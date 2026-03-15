@@ -45,6 +45,15 @@ def plot_response_overlays(
         baseline = case.get("baseline")
         if baseline is not None:
             axis.plot(time_grid, baseline, label="mean baseline", linewidth=1.5, linestyle=":")
+        knn_baseline = case.get("knn_baseline")
+        if knn_baseline is not None:
+            axis.plot(
+                time_grid,
+                knn_baseline,
+                label="k-NN baseline",
+                linewidth=1.2,
+                linestyle="-.",
+            )
         axis.set_title(str(case["label"]))
         axis.set_xlabel("Time [s]")
         axis.set_ylabel("Output y(t)")
@@ -80,14 +89,30 @@ def plot_confusion_matrix(
 
 
 def plot_dataset_family_stability(
-    samples: pd.DataFrame,
+    samples_or_summary: pd.DataFrame,
     output_path: str | Path,
     title: str,
 ) -> None:
-    summary = samples.groupby("plant_family", dropna=False)["stable"].mean().mul(100.0)
-    summary = summary.sort_values(ascending=False)
+    if {"plant_family", "stable_fraction_pct"}.issubset(samples_or_summary.columns):
+        summary = (
+            samples_or_summary[["plant_family", "stable_fraction_pct"]]
+            .drop_duplicates()
+            .sort_values("stable_fraction_pct", ascending=False)
+        )
+        x_values = summary["plant_family"]
+        y_values = summary["stable_fraction_pct"]
+    else:
+        summary = (
+            samples_or_summary.groupby("plant_family", dropna=False)["stable"]
+            .mean()
+            .mul(100.0)
+        )
+        summary = summary.sort_values(ascending=False)
+        x_values = summary.index
+        y_values = summary.values
+
     figure, axis = plt.subplots(figsize=(10, 4.5))
-    axis.bar(summary.index, summary.values, color="#4C72B0")
+    axis.bar(x_values, y_values, color="#4C72B0")
     axis.set_title(title)
     axis.set_ylabel("Stable Fraction [%]")
     axis.set_ylim(0, 100)
@@ -152,6 +177,24 @@ def plot_trajectory_amplitudes(
     plt.close(figure)
 
 
+def plot_oscillation_frequency_distribution(
+    oscillation_hz: np.ndarray,
+    output_path: str | Path,
+    title: str,
+) -> None:
+    figure, axis = plt.subplots(figsize=(7.2, 4.2))
+    finite_values = oscillation_hz[np.isfinite(oscillation_hz)]
+    if finite_values.size:
+        axis.hist(finite_values, bins=50, color="#DD8452", alpha=0.85)
+    axis.set_title(title)
+    axis.set_xlabel("Dominant oscillation frequency [Hz]")
+    axis.set_ylabel("Count")
+    axis.grid(alpha=0.3)
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=180)
+    plt.close(figure)
+
+
 def plot_error_distributions(
     sample_errors: pd.DataFrame,
     output_path: str | Path,
@@ -170,6 +213,71 @@ def plot_error_distributions(
     axis.set_xlabel("Per-sample trajectory RMSE")
     axis.set_ylabel("Density")
     axis.grid(alpha=0.3)
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=180)
+    plt.close(figure)
+
+
+def plot_error_vs_continuous_feature(
+    sample_errors: pd.DataFrame,
+    feature_column: str,
+    output_path: str | Path,
+    title: str,
+    xlabel: str,
+) -> None:
+    figure, axis = plt.subplots(figsize=(7.5, 4.5))
+    for split, color in [("test", "#4C72B0"), ("ood_test", "#C44E52")]:
+        split_frame = sample_errors.loc[sample_errors["split"] == split]
+        if split_frame.empty:
+            continue
+        if split_frame.shape[0] > 80_000:
+            split_frame = split_frame.sample(80_000, random_state=42)
+        axis.scatter(
+            split_frame[feature_column],
+            split_frame["trajectory_rmse"],
+            s=7,
+            alpha=0.18,
+            label=split,
+            color=color,
+        )
+    axis.set_title(title)
+    axis.set_xlabel(xlabel)
+    axis.set_ylabel("Trajectory RMSE")
+    axis.grid(alpha=0.25)
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=180)
+    plt.close(figure)
+
+
+def plot_error_vs_order(
+    sample_errors: pd.DataFrame,
+    output_path: str | Path,
+    title: str,
+) -> None:
+    grouped = (
+        sample_errors.groupby(["split", "plant_order"], dropna=False)["trajectory_rmse"]
+        .mean()
+        .reset_index()
+    )
+    figure, axis = plt.subplots(figsize=(7.5, 4.5))
+    for split, color in [("test", "#4C72B0"), ("ood_test", "#C44E52")]:
+        split_frame = grouped.loc[grouped["split"] == split]
+        if split_frame.empty:
+            continue
+        axis.plot(
+            split_frame["plant_order"],
+            split_frame["trajectory_rmse"],
+            marker="o",
+            linewidth=2.0,
+            color=color,
+            label=split,
+        )
+    axis.set_title(title)
+    axis.set_xlabel("Plant order")
+    axis.set_ylabel("Mean trajectory RMSE")
+    axis.grid(alpha=0.25)
     axis.legend()
     figure.tight_layout()
     figure.savefig(output_path, dpi=180)

@@ -5,6 +5,7 @@
 .pytest_cache/
 .ruff_cache/
 .venv/
+build/
 __pycache__/
 *.egg-info/
 *.pyc
@@ -14,4 +15,3 @@ artifacts/*
 
 reports/figures/
 !reports/figures/.gitkeep
-

@@ -1,0 +1,14 @@
+name: smoke_training_v4
+dataset_dir: artifacts/datasets/smoke_v4
+output_dir: artifacts/runs
+seed: 42
+device: auto
+batch_size: 768
+epochs: 18
+patience: 4
+learning_rate: 0.001
+weight_decay: 0.0001
+hidden_sizes: [384, 384, 384]
+classifier_hidden_sizes: [192, 192, 192]
+dropout: 0.1
+classifier_dropout: 0.1

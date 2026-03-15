@@ -1,0 +1,11 @@
+name: evaluation_v4
+dataset_dir: artifacts/datasets/full_v4
+run_dir: artifacts/runs/training_v4
+output_dir: reports/evaluations
+benchmark_batch_size: 512
+benchmark_single_repeats: 180
+benchmark_batch_repeats: 36
+inference_batch_size: 4096
+knn_neighbors: 1
+knn_train_cap: 30000
+knn_seed: 42

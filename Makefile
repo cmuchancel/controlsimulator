@@ -1,46 +1,46 @@
-PYTHON := uv run
+UV_ENV := PYTHONPATH=src UV_NO_EDITABLE=1
+PYTHON := $(UV_ENV) uv run python -m controlsimulator
 
 .PHONY: setup lint format test generate-smoke-data generate-full-data train-smoke train-full evaluate-smoke evaluate-full benchmark-smoke benchmark-full demo overnight
 
 setup:
-	uv sync --group dev
+	UV_NO_EDITABLE=1 uv sync --group dev
 
 lint:
-	uv run ruff check .
+	$(UV_ENV) uv run ruff check .
 
 format:
-	uv run ruff format .
+	$(UV_ENV) uv run ruff format .
 
 test:
-	uv run pytest
+	$(UV_ENV) uv run pytest
 
 generate-smoke-data:
-	$(PYTHON) controlsimulator generate-dataset --config configs/datasets/smoke.yaml
+	$(PYTHON) generate-dataset --config configs/datasets/smoke_v4.yaml
 
 generate-full-data:
-	$(PYTHON) controlsimulator generate-dataset --config configs/datasets/full.yaml
+	$(PYTHON) generate-dataset --config configs/datasets/full_v4.yaml
 
 train-smoke:
-	$(PYTHON) controlsimulator train --config configs/training/smoke.yaml
+	$(PYTHON) train --config configs/training/smoke_v4.yaml
 
 train-full:
-	$(PYTHON) controlsimulator train --config configs/training/full.yaml
+	$(PYTHON) train --config configs/training/training_v4.yaml
 
 evaluate-smoke:
-	$(PYTHON) controlsimulator evaluate --config configs/evaluation/smoke.yaml
+	$(PYTHON) evaluate --config configs/evaluation/smoke_v4.yaml
 
 evaluate-full:
-	$(PYTHON) controlsimulator evaluate --config configs/evaluation/full.yaml
+	$(PYTHON) evaluate --config configs/evaluation/evaluation_v4.yaml
 
 benchmark-smoke:
-	$(PYTHON) controlsimulator benchmark --config configs/evaluation/smoke.yaml
+	$(PYTHON) benchmark --config configs/evaluation/smoke_v4.yaml
 
 benchmark-full:
-	$(PYTHON) controlsimulator benchmark --config configs/evaluation/full.yaml
+	$(PYTHON) benchmark --config configs/evaluation/evaluation_v4.yaml
 
 demo:
-	$(PYTHON) controlsimulator demo --config configs/evaluation/full.yaml
+	$(PYTHON) demo --config configs/evaluation/evaluation_v4.yaml
 
 overnight:
-	$(PYTHON) controlsimulator overnight
-
+	$(PYTHON) overnight

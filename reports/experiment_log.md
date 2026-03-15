@@ -4,105 +4,107 @@
 
 Environment and checks:
 
-- `uv sync --group dev`
-- `uv run ruff check src/controlsimulator tests`
-- `uv run pytest -q`
+- `UV_NO_EDITABLE=1 uv sync --group dev`
+- `PYTHONPATH=src UV_NO_EDITABLE=1 uv run ruff check src tests`
+- `PYTHONPATH=src UV_NO_EDITABLE=1 uv run pytest -q`
 
-Smoke workflow:
+Smoke v4 workflow:
 
-- `uv run controlsimulator generate-dataset --config configs/datasets/smoke.yaml`
-- `uv run controlsimulator train --config configs/training/smoke.yaml`
-- `uv run controlsimulator evaluate --config configs/evaluation/smoke.yaml`
-- `uv run controlsimulator benchmark --config configs/evaluation/smoke.yaml`
+- `/usr/bin/time -l env PYTHONPATH=src UV_NO_EDITABLE=1 uv run python -m controlsimulator generate-dataset --config configs/datasets/smoke_v4.yaml`
+- `/usr/bin/time -l env PYTHONPATH=src UV_NO_EDITABLE=1 uv run python -m controlsimulator train --config configs/training/smoke_v4.yaml`
+- `/usr/bin/time -l env PYTHONPATH=src UV_NO_EDITABLE=1 uv run python -m controlsimulator evaluate --config configs/evaluation/smoke_v4.yaml`
+- `env PYTHONPATH=src UV_NO_EDITABLE=1 uv run python -m controlsimulator benchmark --config configs/evaluation/smoke_v4.yaml`
 
-Scaled workflow:
+Full v4 workflow:
 
-- `/usr/bin/time -p uv run controlsimulator generate-dataset --config configs/datasets/full.yaml`
-- `/usr/bin/time -p uv run controlsimulator train --config configs/training/full.yaml`
-- `/usr/bin/time -p uv run controlsimulator evaluate --config configs/evaluation/full.yaml`
-- `/usr/bin/time -p uv run controlsimulator benchmark --config configs/evaluation/full.yaml`
+- `/usr/bin/time -l env PYTHONPATH=src UV_NO_EDITABLE=1 uv run python -m controlsimulator generate-dataset --config configs/datasets/full_v4.yaml`
+- `/usr/bin/time -l env PYTHONPATH=src UV_NO_EDITABLE=1 uv run python -m controlsimulator train --config configs/training/training_v4.yaml`
+- `/usr/bin/time -l env PYTHONPATH=src UV_NO_EDITABLE=1 uv run python -m controlsimulator evaluate --config configs/evaluation/evaluation_v4.yaml`
+- `/usr/bin/time -l env PYTHONPATH=src UV_NO_EDITABLE=1 uv run python -m controlsimulator benchmark --config configs/evaluation/evaluation_v4.yaml`
 
 ## Datasets Created
 
-### `artifacts/datasets/smoke_v3`
+### `artifacts/datasets/smoke_v4`
 
-- total samples: 5,760
-- plants: 360
-- controllers per plant: 16
-- stable fraction: 68.35%
+- total samples: 17,280
+- plants: 960
+- controllers per plant: 18
+- stable fraction: 63.59%
 - failure counts:
-  - `unstable_closed_loop`: 1,714
-  - `control_effort_limit_exceeded`: 109
+  - `unstable_closed_loop`: 4,995
+- dataset size: 25,614,055 bytes
 
-### `artifacts/datasets/full_v3`
+### `artifacts/datasets/full_v4`
 
-- total samples: 512,000
-- plants: 16,000
-- controllers per plant: 32
-- stable fraction: 67.99%
+- total samples: 3,456,000
+- plants: 96,000
+- controllers per plant: 36
+- stable fraction: 69.17%
 - split counts:
-  - train: 313,728
-  - val: 67,264
-  - test: 67,264
-  - ood_test: 63,744
+  - train: 2,257,920
+  - val: 483,840
+  - test: 483,876
+  - ood_test: 230,364
 - failure counts:
-  - `unstable_closed_loop`: 157,159
-  - `control_effort_limit_exceeded`: 6,721
-- dataset size: 536,224,027 bytes
+  - `unstable_closed_loop`: 1,065,466
+- dataset size: 2,736,977,390 bytes
 
 ## Checkpoints Produced
 
-Smoke:
+Smoke v4:
 
-- `artifacts/runs/smoke_mlp_v3/classifier.pt`
-- `artifacts/runs/smoke_mlp_v3/regressor.pt`
-- `artifacts/runs/smoke_mlp_v3/train_summary.json`
+- `artifacts/runs/smoke_training_v4/classifier.pt`
+- `artifacts/runs/smoke_training_v4/regressor.pt`
+- `artifacts/runs/smoke_training_v4/train_summary.json`
 
-Scaled:
+Full v4:
 
-- `artifacts/runs/full_mlp_v3/classifier.pt`
-- `artifacts/runs/full_mlp_v3/regressor.pt`
-- `artifacts/runs/full_mlp_v3/train_summary.json`
+- `artifacts/runs/training_v4/classifier.pt`
+- `artifacts/runs/training_v4/regressor.pt`
+- `artifacts/runs/training_v4/train_summary.json`
 
 ## Report Artifacts Produced
 
-Smoke:
+Smoke v4:
 
-- `reports/evaluations/smoke_mlp_v3/evaluation_summary.json`
-- `reports/evaluations/smoke_mlp_v3/benchmark_summary.json`
-- `reports/evaluations/smoke_mlp_v3/plots/*`
+- `reports/evaluations/smoke_evaluation_v4/evaluation_summary.json`
+- `reports/evaluations/smoke_evaluation_v4/benchmark_summary.json`
+- `reports/evaluations/smoke_evaluation_v4/plots/*`
 
-Scaled:
+Full v4:
 
-- `reports/evaluations/full_mlp_v3/evaluation_summary.json`
-- `reports/evaluations/full_mlp_v3/benchmark_summary.json`
-- `reports/evaluations/full_mlp_v3/family_metrics.csv`
-- `reports/evaluations/full_mlp_v3/plots/*`
+- `reports/evaluations/evaluation_v4/evaluation_summary.json`
+- `reports/evaluations/evaluation_v4/benchmark_summary.json`
+- `reports/evaluations/evaluation_v4/family_metrics.csv`
+- `reports/evaluations/evaluation_v4/sample_errors.csv`
+- `reports/evaluations/evaluation_v4/plots/*`
 
-Additional artifact plots:
+Mirrored artifact plots:
 
-- `artifacts/plots/full_v3/*`
-- `artifacts/plots/full_mlp_v3/*`
+- `artifacts/plots/full_v4/*`
+- `artifacts/plots/evaluation_v4/*`
 
 ## Elapsed Runtimes
 
 Exact wall times:
 
-- `uv run pytest -q`: 13.79 s
-- scaled dataset generation: 192.49 s
-- scaled train command: 273.13 s
-- scaled evaluation command: 16.12 s
-- scaled benchmark command: 35.65 s
+- `PYTHONPATH=src UV_NO_EDITABLE=1 uv run pytest -q`: 24.74 s
+- `full_v4` dataset generation: 1,579.71 s
+- `training_v4` train command: 1,528.54 s
+- `evaluation_v4` evaluation command: 163.71 s
+- `evaluation_v4` benchmark command: 41.24 s
 
 Internal train times from saved summaries:
 
-- scaled classifier: 130.68 s
-- scaled regressor: 133.85 s
-- smoke classifier: 3.44 s
-- smoke regressor: 2.69 s
+- `training_v4` classifier: 285.90 s
+- `training_v4` regressor: 1,204.00 s
+- `smoke_training_v4` classifier: 5.17 s
+- `smoke_training_v4` regressor: 6.90 s
 
 ## Notes
 
-- The scaled dataset is about 11.85x larger than the earlier 43.2k run.
-- Multiprocessing generation remained deterministic in tests when comparing `num_workers=1` vs `num_workers=2`.
-- The scaled run is intentionally harder than the earlier baseline, so some accuracy metrics dropped while several transient-response metrics improved.
+- `full_v4` is 6.75x larger than `full_v3`.
+- The v4 dataset remained chunk-native; consolidated trajectory files were intentionally disabled for the full run.
+- The classifier remained better than majority accuracy but weaker than majority F1 on OOD.
+- The regressor still beat the mean and 1-NN baselines by a wide margin on both ID and OOD trajectories.
+- Single-example benchmark speed was worse than simulation on `mps`, while batch benchmark speed remained strongly in the surrogate’s favor.

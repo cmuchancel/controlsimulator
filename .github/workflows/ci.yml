@@ -12,6 +12,6 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
-      - run: uv sync --group dev
-      - run: uv run ruff check .
-      - run: uv run pytest -q
+      - run: UV_NO_EDITABLE=1 uv sync --group dev
+      - run: PYTHONPATH=src UV_NO_EDITABLE=1 uv run ruff check .
+      - run: PYTHONPATH=src UV_NO_EDITABLE=1 uv run pytest -q

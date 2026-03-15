@@ -1,30 +1,30 @@
 # controlsimulator
 
-`controlsimulator` is a research-grade Python starter repo for learning surrogate models of PID-controlled continuous-time systems. The current version ships a clean end-to-end pipeline for:
+`controlsimulator` is a research-grade Python starter repo for learning surrogate models of PID-controlled continuous-time systems. The current repository includes:
 
 - stable SISO LTI plant sampling from poles and optional zeros
-- PID closed-loop simulation with finite derivative filter
-- chunked dataset generation with deterministic seeds
-- plant-level train/val/test splitting
+- PID closed-loop simulation with a finite derivative filter
+- deterministic chunked dataset generation
+- plant-level train/val/test splitting with an explicit OOD family holdout
 - stability classification on all samples
 - stable-only trajectory regression
 - evaluation, benchmarking, diagnostics, and plots
 
-The project goal is practical and honest: produce a reproducible baseline that can scale to large synthetic datasets without turning into a notebook prototype or hiding failure cases.
+The point of the project is practical: build a clean, reproducible baseline that can scale into the multi-million-sample regime without turning into a notebook prototype or hiding failure cases.
 
 ## Why This Exists
 
-Step-response simulation is cheap for one plant-controller pair but expensive inside repeated search or optimization loops. A learned surrogate can be useful for:
+Closed-loop simulation is cheap for one plant-controller pair and expensive inside repeated search loops. A learned surrogate can help with:
 
 - rapid controller screening
 - approximate stability filtering
 - trajectory prediction without re-simulating every candidate
-- downstream control-metric estimation from predicted responses
+- downstream metric estimation from predicted trajectories
 
 ## Quickstart
 
 ```bash
-uv sync --group dev
+make setup
 make test
 make generate-smoke-data
 make train-smoke
@@ -32,67 +32,76 @@ make evaluate-smoke
 make benchmark-smoke
 ```
 
-Full scaled run:
+Full v4 workflow:
 
 ```bash
 make overnight
 ```
 
-CLI entry point:
+Direct CLI:
 
 ```bash
-uv run controlsimulator --help
+PYTHONPATH=src UV_NO_EDITABLE=1 uv run python -m controlsimulator --help
 ```
 
 ## Reproducible Workflows
 
 Smoke workflow:
 
-- dataset config: `configs/datasets/smoke.yaml`
-- train config: `configs/training/smoke.yaml`
-- eval config: `configs/evaluation/smoke.yaml`
+- dataset config: `configs/datasets/smoke_v4.yaml`
+- train config: `configs/training/smoke_v4.yaml`
+- eval config: `configs/evaluation/smoke_v4.yaml`
 
-Scaled workflow:
+Full workflow:
 
-- dataset config: `configs/datasets/full.yaml`
-- train config: `configs/training/full.yaml`
-- eval config: `configs/evaluation/full.yaml`
+- dataset config: `configs/datasets/full_v4.yaml`
+- train config: `configs/training/training_v4.yaml`
+- eval config: `configs/evaluation/evaluation_v4.yaml`
 
-Generated datasets are written under `artifacts/datasets/`. Runs and checkpoints are written under `artifacts/runs/`. Diagnostic and analysis plots are written under `artifacts/plots/`. These directories are gitignored. Committed reports and selected evaluation plots live under `reports/evaluations/`.
+Generated datasets live under `artifacts/datasets/`. Runs and checkpoints live under `artifacts/runs/`. Diagnostic plots are mirrored into `artifacts/plots/`. These directories are gitignored. Committed evaluation summaries and plots live under `reports/evaluations/`.
 
 ## Data Generation
 
 ### Plant Families
 
-The scaled pipeline now samples from eight stable families:
+`full_v4` samples from 15 stable families:
 
 1. `first_order`
 2. `second_order`
 3. `underdamped_second_order`
 4. `overdamped_second_order`
-5. `third_order_real_poles`
-6. `third_order_mixed_real_complex`
-7. `lightly_damped_second_order`
-8. `weakly_resonant_third_order`
+5. `lightly_damped_second_order`
+6. `highly_resonant_second_order`
+7. `third_order_real_poles`
+8. `third_order_mixed_real_complex`
+9. `weakly_resonant_third_order`
+10. `fourth_order_real`
+11. `fourth_order_mixed_complex`
+12. `two_mode_resonant`
+13. `near_integrator`
+14. `slow_dynamics_family`
+15. `fast_dynamics_family`
 
 `lightly_damped_second_order` remains fully held out as the OOD family.
 
 ### Controller And Simulation Setup
 
-- controller: `C(s) = Kp + Ki/s + Kd*s/(tau_d*s + 1)` with `tau_d = 0.05`
+- controller: `C(s) = Kp + Ki/s + Kd*s/(tau_d*s + 1)`
+- derivative filter: `tau_d = 0.05`
 - closed loop: unity feedback
 - response: unit step
-- horizon: 8 s
-- sampling grid: 160 points for smoke, 200 points for full
+- horizon: 12 s
+- sampling grid: 300 points
 
 ### Gain Sampling
 
-Gains are sampled with a deterministic mixture strategy:
+The v4 generator uses a deterministic mixture:
 
-- 50% wide random sampling from heuristic-scaled log-uniform ranges
-- 50% targeted boundary sampling using stable/unstable bracketing and local perturbation
+- 40% wide random sampling from heuristic-scaled log-uniform gain ranges
+- 40% boundary search around stable/unstable brackets
+- 20% oscillation-targeted search biased toward low-damping, near-boundary closed loops
 
-Shipped multiplier ranges:
+Multiplier ranges:
 
 - `Kp` in `[0.02, 50.0]`
 - `Ki` in `[0.01, 80.0]`
@@ -101,17 +110,18 @@ Shipped multiplier ranges:
 ### Storage And Reproducibility
 
 - metadata chunks: Parquet
-- trajectories: compressed NumPy `.npz`
-- final dataset metadata includes family-wise stability, failure counts, timing, and disk usage
-- generation is deterministic by `plant_id` seed and remains deterministic across worker counts
-- dataset directories are fingerprinted so stale chunks from a different config are rejected
+- trajectory chunks: compressed NumPy `.npz`
+- plant-level splits: saved explicitly in `plant_splits.parquet`
+- generation: deterministic by `plant_id` seed and deterministic across worker counts
+- dataset directories: fingerprinted so stale chunks from a different config are rejected
+- large datasets: kept chunk-native instead of forcing a single monolithic trajectory array
 
 ## Modeling Approach
 
 Two separate MLP baselines are trained:
 
 1. Stability classifier
-   Predicts whether a sampled plant-plus-PID controller is usable and stable under the simulator’s safety rules.
+   Predicts whether a sampled plant-plus-controller pair is usable and stable.
 
 2. Trajectory regressor
    Predicts the full stable step-response trajectory `y(t_1...t_N)`.
@@ -119,16 +129,17 @@ Two separate MLP baselines are trained:
 Design choices:
 
 - stable-only regression targets
-- standardized input features
+- standardized plant and gain features
 - early stopping
 - saved checkpoints and train histories
 - simple baselines for context:
-  - majority-class stability predictor
-  - mean-trajectory regressor
+  - majority-class stability baseline
+  - mean-trajectory baseline
+  - capped 1-NN trajectory baseline in standardized feature space
 
 ## Evaluation Methodology
 
-The repo reports:
+The repository reports:
 
 1. Held-out plant evaluation
    Splits are by `plant_id`, never by row.
@@ -143,92 +154,122 @@ The repo reports:
    Overshoot, rise time, settling time, and steady-state error are recomputed from both true and predicted trajectories.
 
 5. Diagnostic plots
-   Response overlays, per-sample error distributions, family-level performance, gain distributions, and PID stability slices.
+   Response overlays, family-level performance, stability boundary slices, error histograms, and error-vs-frequency / damping / order plots.
 
-## Key Results From The Scaled Run
+## Key Results From The Full V4 Run
 
-Scaled dataset (`full_v3`):
+Dataset `full_v4`:
 
-- 512,000 total controller samples
-- 16,000 plants
-- 32 controllers per plant
-- 67.99% stable overall
-- 157,159 mathematically unstable closed loops
-- 6,721 additional samples rejected for control-effort limit
-- dataset disk usage: 536,224,027 bytes, about 511 MiB
-- generation wall time: 192.49 s
+- 3,456,000 total samples
+- 96,000 plants
+- 36 controllers per plant
+- 69.17% stable overall
+- 15 plant families
+- OOD family: `lightly_damped_second_order`
+- on-disk size: 2,736,977,390 bytes, about 2.55 GiB
+- generation wall time: 1,579.71 s, about 26.3 min
 
 Split counts:
 
-- train: 313,728
-- val: 67,264
-- test: 67,264
-- ood_test: 63,744
+- train: 2,257,920
+- val: 483,840
+- test: 483,876
+- ood_test: 230,364
 
 Stable fractions by split:
 
-- train: 67.94%
-- val: 68.24%
-- test: 68.40%
-- ood_test: 67.55%
+- train: 68.96%
+- val: 69.03%
+- test: 68.82%
+- ood_test: 72.25%
 
 ### Stability Classification
 
-| Split | Accuracy | Precision | Recall | F1 | Majority Accuracy |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Test | 0.9127 | 0.9908 | 0.8805 | 0.9324 | 0.6840 |
-| OOD | 0.8745 | 0.9470 | 0.8625 | 0.9028 | 0.6755 |
+| Split | Accuracy | Precision | Recall | F1 | Majority Accuracy | Majority F1 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Test | 0.7980 | 0.9654 | 0.7328 | 0.8332 | 0.6882 | 0.8153 |
+| OOD | 0.7625 | 0.9997 | 0.6715 | 0.8034 | 0.7225 | 0.8389 |
+
+Interpretation:
+
+- the classifier still beats majority accuracy
+- it becomes much more conservative on the held-out lightly damped OOD family
+- on OOD, majority F1 is actually better than the trained classifier F1 because the classifier trades recall for near-perfect precision
 
 ### Stable-Trajectory Regression
 
-| Split | Stable Samples | Traj RMSE | Mean Baseline RMSE | Traj MAE | Mean Baseline MAE |
+| Split | Stable Samples | Traj RMSE | Traj MAE | Mean Baseline RMSE | 1-NN Baseline RMSE |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Test | 46,011 | 0.0902 | 0.3618 | 0.0399 | 0.2786 |
-| OOD | 43,057 | 0.1344 | 0.3448 | 0.0687 | 0.2647 |
+| Test | 333,011 | 0.1728 | 0.0912 | 0.4311 | 0.3719 |
+| OOD | 166,445 | 0.1679 | 0.0927 | 0.3603 | 0.3364 |
+
+The surrogate remains clearly better than both baselines, but the absolute error is materially worse than the earlier `full_v3` run because the v4 dataset is much broader and harder.
 
 ### Derived Metric Error
 
 | Split | Overshoot MAE | Rise-Time MAE | Settling-Time MAE | SSE MAE |
 | --- | ---: | ---: | ---: | ---: |
-| Test | 3.59 pct-pts | 0.073 s | 0.976 s | 0.0454 |
-| OOD | 6.21 pct-pts | 0.099 s | 1.425 s | 0.0638 |
+| Test | 10.25 pct-pts | 0.400 s | 4.339 s | 0.0782 |
+| OOD | 13.43 pct-pts | 0.219 s | 4.832 s | 0.0794 |
 
 Coverage:
 
-- rise time was defined for 79.35% of stable test predictions and 81.23% of stable OOD predictions
-- settling time was defined for 29.91% of stable test predictions and 21.36% of stable OOD predictions
+- rise time was defined for 66.77% of stable test predictions and 86.09% of stable OOD predictions
+- settling time was defined for 24.76% of stable test predictions and 37.64% of stable OOD predictions
 
 ### Runtime
 
 | Benchmark | Simulator | Surrogate | Speedup |
 | --- | ---: | ---: | ---: |
-| Single sample | 1.145 ms | 0.111 ms | 10.35x |
-| Batch of 512 | 0.689 s | 0.00212 s | 324.50x |
+| Single sample | 1.465 ms | 2.758 ms | 0.53x |
+| Batch of 512 | 0.888 s | 0.00556 s | 159.70x |
 
-### Scaling Effects vs The Earlier 43k Run
+The full benchmark was run on `mps`. Single-example surrogate inference is slower than direct simulation because of device launch overhead, but batch inference remains much faster.
 
-The earlier `full_v2` dataset had 43,200 samples from 1,800 plants. Scaling to 512k samples made the task harder:
+### Where The Model Fails
 
-- classifier accuracy dropped from `0.9816` to `0.9127` on held-out plants
-- classifier OOD accuracy dropped from `0.9607` to `0.8745`
-- trajectory RMSE rose from `0.0659` to `0.0902` on held-out plants
-- OOD trajectory RMSE rose from `0.1218` to `0.1344`
+Regression is easiest on:
 
-That drop is not a regression in pipeline quality so much as a result of a broader, more realistic data distribution. At the same time, several derived metrics improved:
+- `first_order`: test RMSE `0.0637`
+- `near_integrator`: test RMSE `0.0927`
+- `slow_dynamics_family`: test RMSE `0.1029`
 
-- overshoot MAE improved on both ID and OOD
-- rise-time MAE improved on both ID and OOD
-- settling-time MAE improved on both ID and OOD
+Regression is hardest on:
 
-Steady-state error MAE became worse, which is one of the clearer remaining weaknesses of the scaled regressor.
+- `fourth_order_mixed_complex`: test RMSE `0.2611`
+- `two_mode_resonant`: test RMSE `0.2506`
+- `weakly_resonant_third_order`: test RMSE `0.2183`
+
+Mean test RMSE rises strongly with plant order:
+
+- order 1: `0.0491`
+- order 2: `0.0995`
+- order 3: `0.1377`
+- order 4: `0.1689`
 
 Representative plots:
 
-![Held-out examples](reports/evaluations/full_mlp_v3/plots/test_response_examples.png)
+![Held-out examples](reports/evaluations/evaluation_v4/plots/test_response_examples.png)
 
-![OOD examples](reports/evaluations/full_mlp_v3/plots/ood_test_response_examples.png)
+![OOD examples](reports/evaluations/evaluation_v4/plots/ood_test_response_examples.png)
 
-![Error distributions](reports/evaluations/full_mlp_v3/plots/error_distributions.png)
+![Family RMSE](reports/evaluations/evaluation_v4/plots/family_trajectory_rmse.png)
+
+![Error vs plant order](reports/evaluations/evaluation_v4/plots/error_vs_plant_order.png)
+
+## Scaling Effects vs V3
+
+`full_v3` used 512k samples from 16k plants and 8 plant families. `full_v4` expanded that to 3.456M samples from 96k plants and 15 plant families, while also extending the horizon from 8 s / 200 steps to 12 s / 300 steps.
+
+That broader dynamics space made the task much harder:
+
+- test classifier accuracy fell from `0.9127` to `0.7980`
+- OOD classifier accuracy fell from `0.8745` to `0.7625`
+- test trajectory RMSE rose from `0.0902` to `0.1728`
+- OOD trajectory RMSE rose from `0.1344` to `0.1679`
+- all reported derived-metric MAEs became worse
+
+This is not a “better score” result. It is a better benchmark result. `full_v4` is a more challenging and more useful stress test for future research.
 
 ## Repo Structure
 
@@ -242,13 +283,13 @@ controlsimulator/
   pyproject.toml
 ```
 
-Key package files:
+Key files:
 
 - `plants.py`: plant-family sampling and gain heuristics
 - `simulate.py`: closed-loop construction and stability checks
 - `dataset.py`: deterministic, chunked, parallel dataset generation
-- `train.py`: classifier and regressor training
-- `evaluate.py`: held-out, OOD, family-level, and plotting evaluation
+- `train.py`: chunk-streamed classifier and regressor training
+- `evaluate.py`: held-out, OOD, family-level, and diagnostic evaluation
 - `benchmark.py`: runtime comparison
 
 ## Tests And Quality
@@ -258,25 +299,14 @@ make lint
 make test
 ```
 
-The test suite covers:
-
-- stable plant generation across families
-- known closed-loop behavior
-- metric extraction correctness
-- split leakage prevention
-- model output shapes
-- deterministic generation across worker counts
-- config-mismatch protection for resumable datasets
-- a tiny end-to-end smoke pipeline
-
 ## Limitations
 
-- Scope is still bounded to stable SISO LTI plants with no delays, saturation, noise, or nonlinearities.
-- The OOD study is only one held-out family, not a broad suite of distribution shifts.
-- First-order plants remain almost entirely stable under positive PID gains, so the classifier boundary is less informative there.
-- The regressor still struggles most on oscillatory tails and on steady-state bias under the broader family mix.
-- Control-effort rejection is currently a simple threshold, not a modeled actuator-limit framework.
+- the classifier is now only modestly better than a majority baseline on OOD
+- fourth-order and multi-mode resonant families remain hard for the regressor
+- the benchmark is hardware-sensitive; on MPS, single-sample surrogate inference is slower than direct simulation
+- the simulator still covers only stable continuous-time SISO LTI plants with unity feedback
+- delays, saturation, sensor noise, and nonlinear dynamics are out of scope in v1
 
 ## Next Steps
 
-See `NEXT_STEPS.md` and `reports/overnight_report.md`.
+See `NEXT_STEPS.md` for the current highest-leverage follow-ups.

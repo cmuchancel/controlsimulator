@@ -10,15 +10,28 @@ import pandas as pd
 import torch
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from torch import nn
-from torch.utils.data import DataLoader, TensorDataset
 
 from controlsimulator.config import TrainingConfig, save_config_snapshot
-from controlsimulator.dataset import load_dataset
-from controlsimulator.features import FEATURE_COLUMNS, Standardizer, feature_matrix
+from controlsimulator.dataset import dataset_metadata, dataset_time_grid, iter_dataset_chunks
+from controlsimulator.features import (
+    FEATURE_COLUMNS,
+    GAIN_FEATURE_COLUMNS,
+    PLANT_FEATURE_COLUMNS,
+    RunningStatistics,
+    Standardizer,
+    feature_matrix,
+)
 from controlsimulator.metrics import trajectory_mae, trajectory_rmse
 from controlsimulator.models import StabilityClassifier, TrajectoryRegressor
 from controlsimulator.plotting import plot_training_history
 from controlsimulator.utils import dump_json, ensure_dir, pick_device, resolve_path, set_global_seed
+
+RAW_FEATURE_COLUMNS = [
+    *PLANT_FEATURE_COLUMNS,
+    *[column for column in GAIN_FEATURE_COLUMNS if not column.startswith("log10_")],
+]
+CLASSIFIER_COLUMNS = [*RAW_FEATURE_COLUMNS, "stable", "split"]
+REGRESSOR_COLUMNS = [*RAW_FEATURE_COLUMNS, "stable", "split"]
 
 
 @dataclass(slots=True)
@@ -37,35 +50,37 @@ class RegressorMetrics:
     mae: float
 
 
+@dataclass(slots=True)
+class TrainingStatistics:
+    feature_scaler: Standardizer
+    trajectory_scaler: Standardizer
+    positive_fraction: float
+    train_samples: int
+    val_samples: int
+    stable_train_samples: int
+    stable_val_samples: int
+    mean_trajectory: np.ndarray
+
+
 def train_models(config: TrainingConfig) -> Path:
     set_global_seed(config.seed)
-    dataset = load_dataset(config.dataset_dir)
+    dataset_dir = resolve_path(config.dataset_dir)
     run_dir = ensure_dir(resolve_path(config.run_dir()))
     plots_dir = ensure_dir(run_dir / "plots")
     save_config_snapshot(config, run_dir / "config_snapshot.yaml")
 
     device = pick_device(config.device)
-    features = feature_matrix(dataset.samples)
-    splits = dataset.samples["split"].to_numpy()
-    stable = dataset.samples["stable"].to_numpy(dtype=bool)
-
-    train_mask = splits == "train"
-    val_mask = splits == "val"
-    stable_train_mask = train_mask & stable
-    stable_val_mask = val_mask & stable
-
-    feature_scaler = Standardizer.fit(features[train_mask])
-    features_scaled = feature_scaler.transform(features).astype(np.float32)
+    time_grid = dataset_time_grid(dataset_dir)
+    data_summary = dataset_metadata(dataset_dir)
+    stats = _fit_training_statistics(dataset_dir)
 
     classifier_path, classifier_history, classifier_summary = _train_classifier(
         config=config,
+        dataset_dir=dataset_dir,
         run_dir=run_dir,
         device=device,
-        inputs=features_scaled,
-        targets=stable.astype(np.float32),
-        train_mask=train_mask,
-        val_mask=val_mask,
-        feature_scaler=feature_scaler,
+        feature_scaler=stats.feature_scaler,
+        positive_fraction=stats.positive_fraction,
     )
     plot_training_history(
         classifier_history,
@@ -74,18 +89,14 @@ def train_models(config: TrainingConfig) -> Path:
         value_columns=("train_loss", "val_loss"),
     )
 
-    trajectory_scaler = Standardizer.fit(dataset.trajectories[stable_train_mask])
-    regressor_path, regressor_history, regressor_summary, mean_trajectory = _train_regressor(
+    regressor_path, regressor_history, regressor_summary = _train_regressor(
         config=config,
+        dataset_dir=dataset_dir,
         run_dir=run_dir,
         device=device,
-        inputs=features_scaled,
-        targets=dataset.trajectories,
-        train_mask=stable_train_mask,
-        val_mask=stable_val_mask,
-        feature_scaler=feature_scaler,
-        trajectory_scaler=trajectory_scaler,
-        time_grid=dataset.time_grid,
+        feature_scaler=stats.feature_scaler,
+        trajectory_scaler=stats.trajectory_scaler,
+        time_grid=time_grid,
     )
     plot_training_history(
         regressor_history,
@@ -96,18 +107,19 @@ def train_models(config: TrainingConfig) -> Path:
 
     summary = {
         "device": device,
+        "dataset_name": data_summary["name"],
         "feature_columns": FEATURE_COLUMNS,
         "classifier_checkpoint": str(classifier_path.relative_to(run_dir)),
         "regressor_checkpoint": str(regressor_path.relative_to(run_dir)),
-        "train_samples": int(train_mask.sum()),
-        "val_samples": int(val_mask.sum()),
-        "stable_train_samples": int(stable_train_mask.sum()),
-        "stable_val_samples": int(stable_val_mask.sum()),
+        "train_samples": stats.train_samples,
+        "val_samples": stats.val_samples,
+        "stable_train_samples": stats.stable_train_samples,
+        "stable_val_samples": stats.stable_val_samples,
         "classifier": classifier_summary,
         "regressor": regressor_summary,
         "mean_trajectory_path": "mean_trajectory.npy",
     }
-    np.save(run_dir / "mean_trajectory.npy", mean_trajectory.astype(np.float32))
+    np.save(run_dir / "mean_trajectory.npy", stats.mean_trajectory.astype(np.float32))
     dump_json(summary, run_dir / "train_summary.json")
     return run_dir
 
@@ -120,37 +132,81 @@ def load_regressor_checkpoint(path: str | Path) -> dict[str, Any]:
     return torch.load(resolve_path(path), map_location="cpu", weights_only=False)
 
 
+def _fit_training_statistics(dataset_dir: Path) -> TrainingStatistics:
+    feature_stats = RunningStatistics()
+    trajectory_stats = RunningStatistics()
+    stable_label_sum = 0
+    train_samples = 0
+    val_samples = 0
+    stable_train_samples = 0
+    stable_val_samples = 0
+    mean_trajectory_sum: np.ndarray | None = None
+
+    for frame, trajectories in iter_dataset_chunks(
+        dataset_dir,
+        include_trajectories=True,
+        columns=REGRESSOR_COLUMNS,
+    ):
+        if trajectories is None:
+            raise RuntimeError("Expected chunk trajectories when fitting training statistics.")
+
+        splits = frame["split"].to_numpy(dtype=str)
+        stable_mask = frame["stable"].to_numpy(dtype=bool)
+        train_mask = splits == "train"
+        val_mask = splits == "val"
+        stable_train_mask = train_mask & stable_mask
+        stable_val_mask = val_mask & stable_mask
+
+        if np.any(train_mask):
+            feature_stats.update(feature_matrix(frame.loc[train_mask, RAW_FEATURE_COLUMNS]))
+        train_samples += int(train_mask.sum())
+        val_samples += int(val_mask.sum())
+        stable_train_samples += int(stable_train_mask.sum())
+        stable_val_samples += int(stable_val_mask.sum())
+        stable_label_sum += int(stable_mask[train_mask].sum())
+
+        if np.any(stable_train_mask):
+            stable_targets = trajectories[stable_train_mask]
+            trajectory_stats.update(stable_targets)
+            if mean_trajectory_sum is None:
+                mean_trajectory_sum = stable_targets.sum(axis=0, dtype=np.float64)
+            else:
+                mean_trajectory_sum += stable_targets.sum(axis=0, dtype=np.float64)
+
+    if mean_trajectory_sum is None or stable_train_samples == 0:
+        raise RuntimeError("Training split does not contain any stable trajectories.")
+
+    return TrainingStatistics(
+        feature_scaler=feature_stats.to_standardizer(),
+        trajectory_scaler=trajectory_stats.to_standardizer(),
+        positive_fraction=float(stable_label_sum / max(train_samples, 1)),
+        train_samples=train_samples,
+        val_samples=val_samples,
+        stable_train_samples=stable_train_samples,
+        stable_val_samples=stable_val_samples,
+        mean_trajectory=(mean_trajectory_sum / stable_train_samples).astype(np.float32),
+    )
+
+
 def _train_classifier(
     config: TrainingConfig,
+    dataset_dir: Path,
     run_dir: Path,
     device: str,
-    inputs: np.ndarray,
-    targets: np.ndarray,
-    train_mask: np.ndarray,
-    val_mask: np.ndarray,
     feature_scaler: Standardizer,
+    positive_fraction: float,
 ) -> tuple[Path, pd.DataFrame, dict[str, float]]:
     model = StabilityClassifier(
-        input_dim=inputs.shape[1],
+        input_dim=len(FEATURE_COLUMNS),
         hidden_sizes=config.classifier_hidden_sizes,
         dropout=config.classifier_dropout,
     ).to(device)
-
-    train_loader = _make_loader(
-        inputs[train_mask],
-        targets[train_mask],
-        config.batch_size,
-        shuffle=True,
+    criterion = nn.BCEWithLogitsLoss(
+        pos_weight=torch.tensor(
+            [(1.0 - max(positive_fraction, 1e-4)) / max(positive_fraction, 1e-4)],
+            device=device,
+        )
     )
-    val_loader = _make_loader(
-        inputs[val_mask],
-        targets[val_mask],
-        config.batch_size,
-        shuffle=False,
-    )
-    positive_fraction = max(float(targets[train_mask].mean()), 1e-4)
-    pos_weight = torch.tensor([(1.0 - positive_fraction) / positive_fraction], device=device)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.learning_rate,
@@ -164,20 +220,26 @@ def _train_classifier(
     train_start = perf_counter()
 
     for epoch in range(1, config.epochs + 1):
-        model.train()
-        train_losses = []
-        for batch_inputs, batch_targets in train_loader:
-            batch_inputs = batch_inputs.to(device)
-            batch_targets = batch_targets.to(device)
-            optimizer.zero_grad()
-            logits = model(batch_inputs)
-            loss = criterion(logits, batch_targets)
-            loss.backward()
-            optimizer.step()
-            train_losses.append(float(loss.detach().cpu()))
-
-        train_loss = float(np.mean(train_losses))
-        val_metrics = _evaluate_classifier(model, val_loader, criterion, device)
+        train_loss = _run_classifier_epoch(
+            model=model,
+            dataset_dir=dataset_dir,
+            split="train",
+            feature_scaler=feature_scaler,
+            batch_size=config.batch_size,
+            device=device,
+            criterion=criterion,
+            optimizer=optimizer,
+            seed=config.seed + epoch,
+        )
+        val_metrics = _evaluate_classifier(
+            model=model,
+            dataset_dir=dataset_dir,
+            split="val",
+            feature_scaler=feature_scaler,
+            batch_size=config.batch_size,
+            device=device,
+            criterion=criterion,
+        )
         history_rows.append(
             {
                 "epoch": epoch,
@@ -193,7 +255,7 @@ def _train_classifier(
             best_state = {
                 "model_state": model.state_dict(),
                 "feature_scaler": feature_scaler.to_dict(),
-                "input_dim": inputs.shape[1],
+                "input_dim": len(FEATURE_COLUMNS),
                 "hidden_sizes": config.classifier_hidden_sizes,
                 "dropout": config.classifier_dropout,
             }
@@ -216,38 +278,19 @@ def _train_classifier(
 
 def _train_regressor(
     config: TrainingConfig,
+    dataset_dir: Path,
     run_dir: Path,
     device: str,
-    inputs: np.ndarray,
-    targets: np.ndarray,
-    train_mask: np.ndarray,
-    val_mask: np.ndarray,
     feature_scaler: Standardizer,
     trajectory_scaler: Standardizer,
     time_grid: np.ndarray,
-) -> tuple[Path, pd.DataFrame, dict[str, float], np.ndarray]:
+) -> tuple[Path, pd.DataFrame, dict[str, float]]:
     model = TrajectoryRegressor(
-        input_dim=inputs.shape[1],
-        output_dim=targets.shape[1],
+        input_dim=len(FEATURE_COLUMNS),
+        output_dim=time_grid.shape[0],
         hidden_sizes=config.hidden_sizes,
         dropout=config.dropout,
     ).to(device)
-
-    mean_trajectory = targets[train_mask].mean(axis=0)
-    scaled_targets = trajectory_scaler.transform(targets[train_mask]).astype(np.float32)
-    scaled_val_targets = trajectory_scaler.transform(targets[val_mask]).astype(np.float32)
-    train_loader = _make_loader(
-        inputs[train_mask],
-        scaled_targets,
-        config.batch_size,
-        shuffle=True,
-    )
-    val_loader = _make_loader(
-        inputs[val_mask],
-        scaled_val_targets,
-        config.batch_size,
-        shuffle=False,
-    )
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.learning_rate,
@@ -262,26 +305,27 @@ def _train_regressor(
     train_start = perf_counter()
 
     for epoch in range(1, config.epochs + 1):
-        model.train()
-        train_losses = []
-        for batch_inputs, batch_targets in train_loader:
-            batch_inputs = batch_inputs.to(device)
-            batch_targets = batch_targets.to(device)
-            optimizer.zero_grad()
-            predictions = model(batch_inputs)
-            loss = criterion(predictions, batch_targets)
-            loss.backward()
-            optimizer.step()
-            train_losses.append(float(loss.detach().cpu()))
-
-        train_loss = float(np.mean(train_losses))
+        train_loss = _run_regressor_epoch(
+            model=model,
+            dataset_dir=dataset_dir,
+            split="train",
+            feature_scaler=feature_scaler,
+            trajectory_scaler=trajectory_scaler,
+            batch_size=config.batch_size,
+            device=device,
+            criterion=criterion,
+            optimizer=optimizer,
+            seed=config.seed + 10_000 + epoch,
+        )
         val_metrics = _evaluate_regressor(
-            model,
-            val_loader,
-            criterion,
-            device,
-            trajectory_scaler,
-            targets[val_mask],
+            model=model,
+            dataset_dir=dataset_dir,
+            split="val",
+            feature_scaler=feature_scaler,
+            trajectory_scaler=trajectory_scaler,
+            batch_size=config.batch_size,
+            device=device,
+            criterion=criterion,
         )
         history_rows.append(
             {
@@ -299,8 +343,8 @@ def _train_regressor(
                 "model_state": model.state_dict(),
                 "feature_scaler": feature_scaler.to_dict(),
                 "trajectory_scaler": trajectory_scaler.to_dict(),
-                "input_dim": inputs.shape[1],
-                "output_dim": targets.shape[1],
+                "input_dim": len(FEATURE_COLUMNS),
+                "output_dim": int(time_grid.shape[0]),
                 "hidden_sizes": config.hidden_sizes,
                 "dropout": config.dropout,
                 "time_grid": time_grid.tolist(),
@@ -319,43 +363,98 @@ def _train_regressor(
     history.to_csv(run_dir / "regressor_history.csv", index=False)
     best_metrics = history.sort_values("val_rmse", ascending=True).iloc[0].to_dict()
     best_metrics["elapsed_seconds"] = perf_counter() - train_start
-    return checkpoint_path, history, best_metrics, mean_trajectory
+    return checkpoint_path, history, best_metrics
 
 
-def _make_loader(
-    inputs: np.ndarray,
-    targets: np.ndarray,
+def _run_classifier_epoch(
+    model: StabilityClassifier,
+    dataset_dir: Path,
+    split: str,
+    feature_scaler: Standardizer,
     batch_size: int,
-    shuffle: bool,
-) -> DataLoader:
-    dataset = TensorDataset(
-        torch.tensor(inputs, dtype=torch.float32),
-        torch.tensor(targets, dtype=torch.float32),
-    )
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+    device: str,
+    criterion: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    seed: int,
+) -> float:
+    model.train()
+    rng = np.random.default_rng(seed)
+    losses = []
+    for frame, _ in iter_dataset_chunks(
+        dataset_dir,
+        include_trajectories=False,
+        splits={split},
+        columns=CLASSIFIER_COLUMNS,
+    ):
+        features = feature_scaler.transform(feature_matrix(frame[RAW_FEATURE_COLUMNS])).astype(
+            np.float32
+        )
+        targets = frame["stable"].to_numpy(dtype=np.float32)
+        indices = rng.permutation(features.shape[0])
+        features = features[indices]
+        targets = targets[indices]
+        for start in range(0, features.shape[0], batch_size):
+            batch_inputs = torch.tensor(
+                features[start : start + batch_size],
+                dtype=torch.float32,
+                device=device,
+            )
+            batch_targets = torch.tensor(
+                targets[start : start + batch_size],
+                dtype=torch.float32,
+                device=device,
+            )
+            optimizer.zero_grad()
+            logits = model(batch_inputs)
+            loss = criterion(logits, batch_targets)
+            loss.backward()
+            optimizer.step()
+            losses.append(float(loss.detach().cpu()))
+    return float(np.mean(losses))
 
 
 def _evaluate_classifier(
     model: StabilityClassifier,
-    loader: DataLoader,
-    criterion: nn.Module,
+    dataset_dir: Path,
+    split: str,
+    feature_scaler: Standardizer,
+    batch_size: int,
     device: str,
+    criterion: nn.Module,
 ) -> ClassifierMetrics:
     model.eval()
-    losses = []
-    all_targets = []
-    all_predictions = []
+    losses: list[float] = []
+    all_targets: list[np.ndarray] = []
+    all_predictions: list[np.ndarray] = []
     with torch.no_grad():
-        for batch_inputs, batch_targets in loader:
-            batch_inputs = batch_inputs.to(device)
-            batch_targets = batch_targets.to(device)
-            logits = model(batch_inputs)
-            loss = criterion(logits, batch_targets)
-            probabilities = torch.sigmoid(logits)
-            predictions = (probabilities >= 0.5).float()
-            losses.append(float(loss.cpu()))
-            all_targets.append(batch_targets.cpu().numpy())
-            all_predictions.append(predictions.cpu().numpy())
+        for frame, _ in iter_dataset_chunks(
+            dataset_dir,
+            include_trajectories=False,
+            splits={split},
+            columns=CLASSIFIER_COLUMNS,
+        ):
+            features = feature_scaler.transform(feature_matrix(frame[RAW_FEATURE_COLUMNS])).astype(
+                np.float32
+            )
+            targets = frame["stable"].to_numpy(dtype=np.float32)
+            for start in range(0, features.shape[0], batch_size):
+                batch_inputs = torch.tensor(
+                    features[start : start + batch_size],
+                    dtype=torch.float32,
+                    device=device,
+                )
+                batch_targets = torch.tensor(
+                    targets[start : start + batch_size],
+                    dtype=torch.float32,
+                    device=device,
+                )
+                logits = model(batch_inputs)
+                loss = criterion(logits, batch_targets)
+                probabilities = torch.sigmoid(logits)
+                predictions = (probabilities >= 0.5).float()
+                losses.append(float(loss.cpu()))
+                all_targets.append(batch_targets.cpu().numpy())
+                all_predictions.append(predictions.cpu().numpy())
 
     targets = np.concatenate(all_targets)
     predictions = np.concatenate(all_predictions)
@@ -368,30 +467,143 @@ def _evaluate_classifier(
     )
 
 
+def _run_regressor_epoch(
+    model: TrajectoryRegressor,
+    dataset_dir: Path,
+    split: str,
+    feature_scaler: Standardizer,
+    trajectory_scaler: Standardizer,
+    batch_size: int,
+    device: str,
+    criterion: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    seed: int,
+) -> float:
+    model.train()
+    rng = np.random.default_rng(seed)
+    losses = []
+    for frame, trajectories in iter_dataset_chunks(
+        dataset_dir,
+        include_trajectories=True,
+        splits={split},
+        stable_only=True,
+        columns=REGRESSOR_COLUMNS,
+    ):
+        if trajectories is None:
+            raise RuntimeError("Expected trajectories for regressor training.")
+        features = feature_scaler.transform(feature_matrix(frame[RAW_FEATURE_COLUMNS])).astype(
+            np.float32
+        )
+        scaled_targets = trajectory_scaler.transform(trajectories).astype(np.float32)
+        indices = rng.permutation(features.shape[0])
+        features = features[indices]
+        scaled_targets = scaled_targets[indices]
+        for start in range(0, features.shape[0], batch_size):
+            batch_inputs = torch.tensor(
+                features[start : start + batch_size],
+                dtype=torch.float32,
+                device=device,
+            )
+            batch_targets = torch.tensor(
+                scaled_targets[start : start + batch_size],
+                dtype=torch.float32,
+                device=device,
+            )
+            optimizer.zero_grad()
+            predictions = model(batch_inputs)
+            loss = criterion(predictions, batch_targets)
+            loss.backward()
+            optimizer.step()
+            losses.append(float(loss.detach().cpu()))
+    return float(np.mean(losses))
+
+
 def _evaluate_regressor(
     model: TrajectoryRegressor,
-    loader: DataLoader,
-    criterion: nn.Module,
-    device: str,
+    dataset_dir: Path,
+    split: str,
+    feature_scaler: Standardizer,
     trajectory_scaler: Standardizer,
-    raw_targets: np.ndarray,
+    batch_size: int,
+    device: str,
+    criterion: nn.Module,
 ) -> RegressorMetrics:
     model.eval()
-    losses = []
-    predictions = []
+    losses: list[float] = []
+    raw_predictions: list[np.ndarray] = []
+    raw_targets: list[np.ndarray] = []
     with torch.no_grad():
-        for batch_inputs, batch_targets in loader:
-            batch_inputs = batch_inputs.to(device)
-            batch_targets = batch_targets.to(device)
-            outputs = model(batch_inputs)
-            loss = criterion(outputs, batch_targets)
-            losses.append(float(loss.cpu()))
-            predictions.append(outputs.cpu().numpy())
+        for frame, trajectories in iter_dataset_chunks(
+            dataset_dir,
+            include_trajectories=True,
+            splits={split},
+            stable_only=True,
+            columns=REGRESSOR_COLUMNS,
+        ):
+            if trajectories is None:
+                raise RuntimeError("Expected trajectories for regressor evaluation.")
+            features = feature_scaler.transform(feature_matrix(frame[RAW_FEATURE_COLUMNS])).astype(
+                np.float32
+            )
+            scaled_targets = trajectory_scaler.transform(trajectories).astype(np.float32)
+            for start in range(0, features.shape[0], batch_size):
+                batch_inputs = torch.tensor(
+                    features[start : start + batch_size],
+                    dtype=torch.float32,
+                    device=device,
+                )
+                batch_targets = torch.tensor(
+                    scaled_targets[start : start + batch_size],
+                    dtype=torch.float32,
+                    device=device,
+                )
+                outputs = model(batch_inputs)
+                loss = criterion(outputs, batch_targets)
+                losses.append(float(loss.cpu()))
+                raw_predictions.append(
+                    trajectory_scaler.inverse_transform(outputs.cpu().numpy()).astype(np.float32)
+                )
+                raw_targets.append(trajectories[start : start + batch_size].astype(np.float32))
 
-    scaled_predictions = np.concatenate(predictions, axis=0)
-    raw_predictions = trajectory_scaler.inverse_transform(scaled_predictions)
+    predictions = np.concatenate(raw_predictions, axis=0)
+    targets = np.concatenate(raw_targets, axis=0)
     return RegressorMetrics(
         loss=float(np.mean(losses)),
-        rmse=trajectory_rmse(raw_targets, raw_predictions),
-        mae=trajectory_mae(raw_targets, raw_predictions),
+        rmse=trajectory_rmse(targets, predictions),
+        mae=trajectory_mae(targets, predictions),
     )
+
+
+def predict_stability_probabilities(
+    model: StabilityClassifier,
+    inputs: np.ndarray,
+    batch_size: int = 2048,
+) -> np.ndarray:
+    device = next(model.parameters()).device
+    tensor_inputs = torch.tensor(inputs, dtype=torch.float32)
+    probabilities = []
+    model.eval()
+    with torch.no_grad():
+        for start in range(0, tensor_inputs.shape[0], batch_size):
+            batch = tensor_inputs[start : start + batch_size].to(device)
+            logits = model(batch)
+            probabilities.append(torch.sigmoid(logits).cpu().numpy())
+    return np.concatenate(probabilities, axis=0)
+
+
+def predict_trajectories(
+    model: TrajectoryRegressor,
+    inputs: np.ndarray,
+    trajectory_scaler: Standardizer,
+    batch_size: int = 2048,
+) -> np.ndarray:
+    device = next(model.parameters()).device
+    tensor_inputs = torch.tensor(inputs, dtype=torch.float32)
+    outputs = []
+    model.eval()
+    with torch.no_grad():
+        for start in range(0, tensor_inputs.shape[0], batch_size):
+            batch = tensor_inputs[start : start + batch_size].to(device)
+            outputs.append(model(batch).cpu().numpy())
+    scaled = np.concatenate(outputs, axis=0)
+    return trajectory_scaler.inverse_transform(scaled)

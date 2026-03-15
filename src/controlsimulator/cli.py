@@ -4,7 +4,7 @@ import argparse
 
 from controlsimulator.benchmark import benchmark_models
 from controlsimulator.config import DatasetConfig, EvaluationConfig, TrainingConfig, load_config
-from controlsimulator.dataset import consolidate_dataset, generate_dataset
+from controlsimulator.dataset import generate_dataset
 from controlsimulator.evaluate import evaluate_models
 from controlsimulator.train import train_models
 from controlsimulator.utils import resolve_path
@@ -24,7 +24,6 @@ def main() -> None:
     if args.command == "generate-dataset":
         config = load_config(resolve_path(args.config), DatasetConfig)
         dataset_dir = generate_dataset(config)
-        consolidate_dataset(config)
         print(f"dataset ready: {dataset_dir}")
         return
     if args.command == "train":
@@ -54,13 +53,19 @@ def main() -> None:
 
 
 def _run_overnight() -> None:
-    dataset_config = load_config(resolve_path("configs/datasets/full.yaml"), DatasetConfig)
-    training_config = load_config(resolve_path("configs/training/full.yaml"), TrainingConfig)
-    evaluation_config = load_config(resolve_path("configs/evaluation/full.yaml"), EvaluationConfig)
+    dataset_config = load_config(resolve_path("configs/datasets/full_v4.yaml"), DatasetConfig)
+    training_config = load_config(resolve_path("configs/training/training_v4.yaml"), TrainingConfig)
+    evaluation_config = load_config(
+        resolve_path("configs/evaluation/evaluation_v4.yaml"),
+        EvaluationConfig,
+    )
 
     generate_dataset(dataset_config)
-    consolidate_dataset(dataset_config)
     train_models(training_config)
     evaluate_models(evaluation_config)
     benchmark_models(evaluation_config)
     print("overnight pipeline completed")
+
+
+if __name__ == "__main__":
+    main()

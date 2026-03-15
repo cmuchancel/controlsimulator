@@ -1,0 +1,48 @@
+name: full_v4
+seed: 42
+output_dir: artifacts/datasets
+n_plants: 96000
+controllers_per_plant: 36
+num_workers: 8
+families:
+  - first_order
+  - second_order
+  - underdamped_second_order
+  - overdamped_second_order
+  - lightly_damped_second_order
+  - highly_resonant_second_order
+  - third_order_real_poles
+  - third_order_mixed_real_complex
+  - weakly_resonant_third_order
+  - fourth_order_real
+  - fourth_order_mixed_complex
+  - two_mode_resonant
+  - near_integrator
+  - slow_dynamics_family
+  - fast_dynamics_family
+ood_families:
+  - lightly_damped_second_order
+t_final: 12.0
+n_time_steps: 300
+derivative_filter_tau: 0.05
+chunk_size_plants: 700
+val_fraction: 0.15
+test_fraction: 0.15
+kp_multiplier_range: [0.02, 50.0]
+ki_multiplier_range: [0.01, 80.0]
+kd_multiplier_range: [0.001, 25.0]
+wide_sampling_fraction: 0.4
+boundary_sampling_fraction: 0.4
+oscillatory_sampling_fraction: 0.2
+boundary_search_steps: 6
+boundary_mix_std: 0.12
+boundary_jitter_std: 0.08
+oscillatory_candidate_count: 16
+oscillatory_boundary_bias: 0.84
+oscillatory_boundary_std: 0.1
+oscillatory_jitter_std: 0.05
+max_abs_trajectory: 25.0
+max_peak_control_effort: 600.0
+max_unstable_fraction_abort: 0.5
+write_consolidated_outputs: false
+consolidation_sample_limit: 600000

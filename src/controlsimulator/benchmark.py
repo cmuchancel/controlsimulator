@@ -7,37 +7,61 @@ from typing import Any
 import numpy as np
 
 from controlsimulator.config import EvaluationConfig
-from controlsimulator.dataset import load_dataset
+from controlsimulator.dataset import dataset_time_grid, iter_dataset_chunks
 from controlsimulator.evaluate import (
     load_models,
     predict_stability_probabilities,
     predict_trajectories,
 )
-from controlsimulator.features import feature_matrix
+from controlsimulator.features import GAIN_FEATURE_COLUMNS, PLANT_FEATURE_COLUMNS, feature_matrix
 from controlsimulator.plants import plant_from_sample_row
 from controlsimulator.simulate import simulate_closed_loop
 from controlsimulator.utils import dump_json, ensure_dir, resolve_path
 
+RAW_FEATURE_COLUMNS = [
+    *PLANT_FEATURE_COLUMNS,
+    *[column for column in GAIN_FEATURE_COLUMNS if not column.startswith("log10_")],
+]
+
 
 def benchmark_models(config: EvaluationConfig) -> Path:
-    dataset = load_dataset(config.dataset_dir)
+    dataset_dir = resolve_path(config.dataset_dir)
+    time_grid = dataset_time_grid(dataset_dir)
     models = load_models(config.run_dir)
     report_dir = ensure_dir(resolve_path(config.report_dir()))
 
-    features = feature_matrix(dataset.samples)
-    scaled_features = models.feature_scaler.transform(features).astype(np.float32)
-    stable_test = dataset.samples[
-        (dataset.samples["split"] == "test") & (dataset.samples["stable"])
-    ].copy()
-    if stable_test.empty:
+    stable_test_frame = None
+    stable_test_trajectories = None
+    for frame, trajectories in iter_dataset_chunks(
+        dataset_dir,
+        include_trajectories=True,
+        splits={"test"},
+        stable_only=True,
+        columns=[
+            *RAW_FEATURE_COLUMNS,
+            "sample_id",
+            "plant_id",
+            "tau_d",
+            "kp",
+            "ki",
+            "kd",
+            "stable",
+            "split",
+        ],
+    ):
+        stable_test_frame = frame
+        stable_test_trajectories = trajectories
+        break
+    if stable_test_frame is None or stable_test_frame.empty or stable_test_trajectories is None:
         raise RuntimeError("No stable test samples available for benchmarking.")
 
-    single_index = int(stable_test.index[0])
-    batch_indices = stable_test.index.to_numpy(dtype=int)[: config.benchmark_batch_size]
+    batch_frame = stable_test_frame.iloc[: config.benchmark_batch_size].copy()
+    batch_features = models.feature_scaler.transform(
+        feature_matrix(batch_frame[RAW_FEATURE_COLUMNS])
+    ).astype(np.float32)
 
-    single_sample = dataset.samples.loc[single_index]
-    single_feature = scaled_features[single_index : single_index + 1]
-    batch_features = scaled_features[batch_indices]
+    single_sample = batch_frame.iloc[0]
+    single_feature = batch_features[:1]
 
     single_simulation = _benchmark_repeat(
         lambda: simulate_closed_loop(
@@ -46,31 +70,31 @@ def benchmark_models(config: EvaluationConfig) -> Path:
             ki=float(single_sample["ki"]),
             kd=float(single_sample["kd"]),
             tau_d=float(single_sample["tau_d"]),
-            time_grid=dataset.time_grid,
+            time_grid=time_grid,
         ),
         config.benchmark_single_repeats,
     )
     single_surrogate = _benchmark_repeat(
-        lambda: _full_surrogate_pass(models, single_feature),
+        lambda: _full_surrogate_pass(models, single_feature, config.inference_batch_size),
         config.benchmark_single_repeats,
     )
 
     batch_simulation = _benchmark_repeat(
         lambda: [
             simulate_closed_loop(
-                plant=plant_from_sample_row(dataset.samples.loc[index]),
-                kp=float(dataset.samples.loc[index, "kp"]),
-                ki=float(dataset.samples.loc[index, "ki"]),
-                kd=float(dataset.samples.loc[index, "kd"]),
-                tau_d=float(dataset.samples.loc[index, "tau_d"]),
-                time_grid=dataset.time_grid,
+                plant=plant_from_sample_row(batch_frame.iloc[index]),
+                kp=float(batch_frame.iloc[index]["kp"]),
+                ki=float(batch_frame.iloc[index]["ki"]),
+                kd=float(batch_frame.iloc[index]["kd"]),
+                tau_d=float(batch_frame.iloc[index]["tau_d"]),
+                time_grid=time_grid,
             )
-            for index in batch_indices
+            for index in range(batch_frame.shape[0])
         ],
         config.benchmark_batch_repeats,
     )
     batch_surrogate = _benchmark_repeat(
-        lambda: _full_surrogate_pass(models, batch_features),
+        lambda: _full_surrogate_pass(models, batch_features, config.inference_batch_size),
         config.benchmark_batch_repeats,
     )
 
@@ -90,9 +114,22 @@ def benchmark_models(config: EvaluationConfig) -> Path:
     return report_dir
 
 
-def _full_surrogate_pass(models: Any, scaled_features: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    stability_probabilities = predict_stability_probabilities(models.classifier, scaled_features)
-    trajectories = predict_trajectories(models.regressor, scaled_features, models.trajectory_scaler)
+def _full_surrogate_pass(
+    models: Any,
+    scaled_features: np.ndarray,
+    batch_size: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    stability_probabilities = predict_stability_probabilities(
+        models.classifier,
+        scaled_features,
+        batch_size=batch_size,
+    )
+    trajectories = predict_trajectories(
+        models.regressor,
+        scaled_features,
+        models.trajectory_scaler,
+        batch_size=batch_size,
+    )
     return stability_probabilities, trajectories
 
 

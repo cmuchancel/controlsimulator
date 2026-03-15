@@ -1,0 +1,11 @@
+name: smoke_evaluation_v4
+dataset_dir: artifacts/datasets/smoke_v4
+run_dir: artifacts/runs/smoke_training_v4
+output_dir: reports/evaluations
+benchmark_batch_size: 64
+benchmark_single_repeats: 80
+benchmark_batch_repeats: 12
+inference_batch_size: 1024
+knn_neighbors: 1
+knn_train_cap: 20000
+knn_seed: 42

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections import Counter
+from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
 from itertools import repeat
@@ -19,13 +21,19 @@ from controlsimulator.plants import Plant, heuristic_pid_scales, sample_pid_gain
 from controlsimulator.plotting import (
     plot_dataset_family_stability,
     plot_gain_distributions,
+    plot_oscillation_frequency_distribution,
     plot_trajectory_amplitudes,
 )
-from controlsimulator.simulate import closed_loop_is_stable, simulate_closed_loop
+from controlsimulator.simulate import (
+    closed_loop_characteristics,
+    closed_loop_is_stable,
+    simulate_closed_loop,
+)
 from controlsimulator.splits import assert_no_plant_leakage, assign_dataset_splits
 from controlsimulator.utils import dump_json, ensure_dir, load_json, resolve_path
 
 MANIFEST_FILENAME = "manifest.json"
+PLANT_SPLITS_FILENAME = "plant_splits.parquet"
 SAMPLES_FILENAME = "samples.parquet"
 TRAJECTORIES_FILENAME = "trajectories.npz"
 
@@ -39,8 +47,15 @@ class DatasetBundle:
     dataset_dir: Path
 
 
+@dataclass(slots=True)
+class DatasetChunk:
+    chunk_index: int
+    metadata_path: Path
+    trajectory_path: Path
+
+
 def time_grid_from_config(config: DatasetConfig) -> np.ndarray:
-    return np.linspace(0.0, config.t_final, config.n_time_steps, dtype=np.float32)
+    return np.linspace(0.0, config.t_final, config.n_time_steps, dtype=np.float64)
 
 
 def generate_dataset(config: DatasetConfig) -> Path:
@@ -65,6 +80,7 @@ def generate_dataset(config: DatasetConfig) -> Path:
             trajectory_path = _chunk_trajectory_path(chunks_dir, chunk_index)
             if metadata_path.exists() and trajectory_path.exists():
                 continue
+
             start_plant = chunk_index * config.chunk_size_plants
             end_plant = min(config.n_plants, start_plant + config.chunk_size_plants)
             frame, trajectories = _generate_chunk(
@@ -74,7 +90,7 @@ def generate_dataset(config: DatasetConfig) -> Path:
                 end_plant=end_plant,
                 executor=executor,
             )
-            _validate_chunk_health(frame)
+            _validate_chunk_health(frame, config)
             frame.to_parquet(metadata_path, index=False, compression="zstd")
             np.savez_compressed(trajectory_path, trajectories=trajectories.astype(np.float32))
     finally:
@@ -91,65 +107,86 @@ def generate_dataset(config: DatasetConfig) -> Path:
 
 def consolidate_dataset(config: DatasetConfig) -> Path:
     dataset_dir = ensure_dir(resolve_path(config.dataset_dir()))
-    chunks_dir = dataset_dir / "chunks"
-    manifest_path = dataset_dir / MANIFEST_FILENAME
-    if not manifest_path.exists():
-        raise FileNotFoundError(f"Missing dataset manifest: {manifest_path}")
-    manifest = load_json(manifest_path)
+    chunks = dataset_chunks(dataset_dir)
+    if not chunks:
+        raise RuntimeError(f"No dataset chunks found in {dataset_dir}.")
 
-    metadata_paths = sorted(chunks_dir.glob("metadata_*.parquet"))
-    trajectory_paths = sorted(chunks_dir.glob("trajectories_*.npz"))
-    expected_indices = set(range(int(manifest["total_chunks"])))
-    actual_metadata_indices = {_chunk_index_from_path(path) for path in metadata_paths}
-    actual_trajectory_indices = {_chunk_index_from_path(path) for path in trajectory_paths}
-    if actual_metadata_indices != expected_indices or actual_trajectory_indices != expected_indices:
-        raise RuntimeError(
-            "Chunk files do not match the manifest. "
-            "Regenerate the missing chunk files or use a new dataset name."
+    plant_splits = _build_plant_split_frame(chunks, config)
+    split_map = dict(
+        zip(
+            plant_splits["plant_id"].astype(int).to_list(),
+            plant_splits["split"].astype(str).to_list(),
+            strict=False,
         )
-
-    samples = pd.concat([pd.read_parquet(path) for path in metadata_paths], ignore_index=True)
-    trajectories = np.concatenate(
-        [np.load(path)["trajectories"] for path in trajectory_paths],
-        axis=0,
-    ).astype(np.float32)
-    if samples.shape[0] != trajectories.shape[0]:
-        raise RuntimeError("Metadata row count does not match trajectory row count.")
-
-    samples["split"] = assign_dataset_splits(
-        samples,
-        val_fraction=config.val_fraction,
-        test_fraction=config.test_fraction,
-        ood_families=config.ood_families,
-        seed=config.seed,
     )
-    assert_no_plant_leakage(samples)
+    plant_splits.to_parquet(dataset_dir / PLANT_SPLITS_FILENAME, index=False, compression="zstd")
 
-    _validate_dataset_health(samples, trajectories, config)
+    aggregate = _empty_aggregate_state()
+    maybe_frames: list[pd.DataFrame] | None = []
+    maybe_trajectories: list[np.ndarray] | None = []
+    should_write_consolidated = (
+        config.write_consolidated_outputs
+        and (config.n_plants * config.controllers_per_plant) <= config.consolidation_sample_limit
+    )
+    if not should_write_consolidated:
+        maybe_frames = None
+        maybe_trajectories = None
+        for stale_file in [dataset_dir / SAMPLES_FILENAME, dataset_dir / TRAJECTORIES_FILENAME]:
+            if stale_file.exists():
+                stale_file.unlink()
 
-    samples.to_parquet(dataset_dir / SAMPLES_FILENAME, index=False, compression="zstd")
-    np.savez_compressed(dataset_dir / TRAJECTORIES_FILENAME, trajectories=trajectories)
+    for chunk in tqdm(chunks, desc=f"consolidate:{config.name}"):
+        frame = pd.read_parquet(chunk.metadata_path)
+        if "split" not in frame.columns or frame["split"].isna().any():
+            frame["split"] = frame["plant_id"].map(split_map)
+            frame.to_parquet(chunk.metadata_path, index=False, compression="zstd")
 
-    metadata = _dataset_metadata(config, samples, trajectories)
+        assert_no_plant_leakage(frame[["plant_id", "split"]].drop_duplicates())
+
+        trajectories = np.load(chunk.trajectory_path)["trajectories"].astype(np.float32)
+        if frame.shape[0] != trajectories.shape[0]:
+            raise RuntimeError(
+                f"Chunk {chunk.chunk_index} metadata row count does not match trajectories."
+            )
+
+        _update_aggregate_state(aggregate, frame, trajectories)
+
+        if (
+            should_write_consolidated
+            and maybe_frames is not None
+            and maybe_trajectories is not None
+        ):
+            maybe_frames.append(frame)
+            maybe_trajectories.append(trajectories)
+
+    _validate_dataset_health(aggregate, config)
+    metadata = _aggregate_metadata(config, aggregate)
     dump_json(metadata, dataset_dir / "metadata.json")
-    _write_dataset_diagnostic_plots(config, dataset_dir, samples, trajectories)
+    _write_dataset_diagnostic_plots(config, dataset_dir, aggregate)
+
+    if should_write_consolidated and maybe_frames is not None and maybe_trajectories is not None:
+        samples = pd.concat(maybe_frames, ignore_index=True)
+        trajectories = np.concatenate(maybe_trajectories, axis=0).astype(np.float32)
+        samples.to_parquet(dataset_dir / SAMPLES_FILENAME, index=False, compression="zstd")
+        np.savez_compressed(dataset_dir / TRAJECTORIES_FILENAME, trajectories=trajectories)
+
     return dataset_dir
 
 
 def load_dataset(dataset_dir: str | Path) -> DatasetBundle:
     resolved = resolve_path(dataset_dir)
     samples_path = resolved / SAMPLES_FILENAME
-    if samples_path.exists():
-        samples = pd.read_parquet(samples_path)
-    else:
-        samples = pd.read_csv(resolved / "samples.csv.gz")
-
     trajectories_path = resolved / TRAJECTORIES_FILENAME
-    if trajectories_path.exists():
-        trajectories = np.load(trajectories_path)["trajectories"]
-    else:
-        trajectories = np.load(resolved / "trajectories.npy")
+    if not samples_path.exists() or not trajectories_path.exists():
+        metadata = load_json(resolved / "metadata.json")
+        raise RuntimeError(
+            f"Dataset {resolved} was generated in chunk-native mode and does not expose "
+            f"consolidated arrays. Metadata reports {metadata['n_samples']} samples; "
+            "use iter_dataset_chunks() for streamed access."
+        )
 
+    samples = pd.read_parquet(samples_path)
+    trajectories = np.load(trajectories_path)["trajectories"]
     time_grid = np.load(resolved / "time_grid.npy")
     metadata = load_json(resolved / "metadata.json")
     return DatasetBundle(
@@ -159,6 +196,71 @@ def load_dataset(dataset_dir: str | Path) -> DatasetBundle:
         metadata=metadata,
         dataset_dir=resolved,
     )
+
+
+def dataset_chunks(dataset_dir: str | Path) -> list[DatasetChunk]:
+    resolved = resolve_path(dataset_dir)
+    manifest = load_json(resolved / MANIFEST_FILENAME)
+    chunks_dir = resolved / "chunks"
+    chunks: list[DatasetChunk] = []
+    for chunk_index in range(int(manifest["total_chunks"])):
+        metadata_path = _chunk_metadata_path(chunks_dir, chunk_index)
+        trajectory_path = _chunk_trajectory_path(chunks_dir, chunk_index)
+        if not metadata_path.exists() or not trajectory_path.exists():
+            raise RuntimeError(
+                f"Missing chunk files for chunk {chunk_index} in dataset {resolved}."
+            )
+        chunks.append(
+            DatasetChunk(
+                chunk_index=chunk_index,
+                metadata_path=metadata_path,
+                trajectory_path=trajectory_path,
+            )
+        )
+    return chunks
+
+
+def dataset_time_grid(dataset_dir: str | Path) -> np.ndarray:
+    return np.load(resolve_path(dataset_dir) / "time_grid.npy")
+
+
+def dataset_metadata(dataset_dir: str | Path) -> dict[str, Any]:
+    return load_json(resolve_path(dataset_dir) / "metadata.json")
+
+
+def iter_dataset_chunks(
+    dataset_dir: str | Path,
+    *,
+    include_trajectories: bool,
+    splits: set[str] | None = None,
+    stable_only: bool = False,
+    columns: list[str] | None = None,
+) -> Iterator[tuple[pd.DataFrame, np.ndarray | None]]:
+    required_columns = set(columns or [])
+    if splits is not None:
+        required_columns.add("split")
+    if stable_only:
+        required_columns.add("stable")
+
+    for chunk in dataset_chunks(dataset_dir):
+        frame = pd.read_parquet(
+            chunk.metadata_path,
+            columns=sorted(required_columns) if required_columns else None,
+        )
+        mask = np.ones(frame.shape[0], dtype=bool)
+        if splits is not None:
+            mask &= frame["split"].isin(splits).to_numpy(dtype=bool)
+        if stable_only:
+            mask &= frame["stable"].to_numpy(dtype=bool)
+        if not np.any(mask):
+            continue
+
+        trajectories = None
+        if include_trajectories:
+            trajectories = np.load(chunk.trajectory_path)["trajectories"].astype(np.float32)
+            trajectories = trajectories[mask]
+        frame = frame.loc[mask].reset_index(drop=True)
+        yield frame, trajectories
 
 
 def _generate_chunk(
@@ -205,12 +307,8 @@ def _generate_single_plant(
     trajectories: list[np.ndarray] = []
     sampled_gains: list[dict[str, Any]] = []
 
-    wide_count = int(round(config.controllers_per_plant * config.wide_sampling_fraction))
-    wide_count = min(max(wide_count, 1), config.controllers_per_plant)
-    targeted_count = config.controllers_per_plant - wide_count
-
-    for controller_index in range(config.controllers_per_plant):
-        if controller_index < wide_count:
+    for controller_index, mode in enumerate(_sampling_modes(config)):
+        if mode == "wide_random":
             kp, ki, kd = sample_pid_gains(
                 rng,
                 plant,
@@ -219,8 +317,15 @@ def _generate_single_plant(
                 tuple(config.kd_multiplier_range),
             )
             sampling_mode = "wide_random"
+        elif mode == "oscillatory_target":
+            kp, ki, kd, sampling_mode = _sample_oscillatory_pid_gains(
+                rng,
+                plant,
+                config,
+                sampled_gains,
+            )
         else:
-            kp, ki, kd, sampling_mode = _sample_targeted_pid_gains(
+            kp, ki, kd, sampling_mode = _sample_boundary_pid_gains(
                 rng,
                 plant,
                 config,
@@ -251,6 +356,10 @@ def _generate_single_plant(
             "dominant_pole_mag": plant.dominant_pole_mag,
             "mean_pole_mag": plant.mean_pole_mag,
             "dominant_time_constant": 1.0 / plant.dominant_pole_mag,
+            "plant_min_damping_ratio": plant.min_damping_ratio,
+            "plant_max_oscillation_hz": plant.max_oscillation_hz,
+            "plant_pole_spread_log10": plant.pole_spread_log10,
+            "plant_has_complex_poles": float(plant.has_complex_poles),
             "kp": kp,
             "ki": ki,
             "kd": kd,
@@ -258,6 +367,8 @@ def _generate_single_plant(
             "root_stable": bool(result.stability_margin < -1e-6),
             "stable": bool(is_usable),
             "stability_margin": result.stability_margin,
+            "closed_loop_oscillation_hz": result.dominant_oscillation_hz,
+            "closed_loop_min_damping_ratio": result.min_damping_ratio,
             "failure_reason": failure_reason,
             "gain_sampling_mode": sampling_mode,
             "trajectory_peak_abs": trajectory_peak_abs,
@@ -298,22 +409,45 @@ def _generate_single_plant(
                 "ki": ki,
                 "kd": kd,
                 "stable": bool(is_usable),
+                "stability_margin": float(result.stability_margin),
+                "closed_loop_oscillation_hz": float(result.dominant_oscillation_hz),
+                "closed_loop_min_damping_ratio": float(result.min_damping_ratio),
             }
         )
 
-    if targeted_count <= 0:
-        return rows, trajectories
     return rows, trajectories
 
 
-def _sample_targeted_pid_gains(
+def _sampling_modes(config: DatasetConfig) -> list[str]:
+    fractions = {
+        "wide_random": config.wide_sampling_fraction,
+        "boundary_search": float(config.boundary_sampling_fraction),
+        "oscillatory_target": config.oscillatory_sampling_fraction,
+    }
+    total_controllers = config.controllers_per_plant
+    raw_counts = {key: value * total_controllers for key, value in fractions.items()}
+    counts = {key: int(math.floor(value)) for key, value in raw_counts.items()}
+    remainder = total_controllers - sum(counts.values())
+    residuals = sorted(
+        ((raw_counts[key] - counts[key], key) for key in fractions),
+        reverse=True,
+    )
+    for _, key in residuals[:remainder]:
+        counts[key] += 1
+
+    modes: list[str] = []
+    for key in ["wide_random", "boundary_search", "oscillatory_target"]:
+        modes.extend([key] * counts[key])
+    return modes
+
+
+def _sample_boundary_pid_gains(
     rng: np.random.Generator,
     plant: Plant,
     config: DatasetConfig,
     sampled_gains: list[dict[str, Any]],
 ) -> tuple[float, float, float, str]:
     low_bounds, high_bounds, base_scales = _gain_bounds(plant, config)
-
     stable_anchor = _find_stable_anchor(rng, plant, config, sampled_gains, base_scales, low_bounds)
     unstable_anchor = _find_unstable_anchor(
         rng,
@@ -332,7 +466,7 @@ def _sample_targeted_pid_gains(
             tuple(config.ki_multiplier_range),
             tuple(config.kd_multiplier_range),
         )
-        return kp, ki, kd, "targeted_fallback_random"
+        return kp, ki, kd, "boundary_fallback_random"
 
     stable_log = np.log(np.clip(stable_anchor, low_bounds, high_bounds))
     unstable_log = np.log(np.clip(unstable_anchor, low_bounds, high_bounds))
@@ -358,6 +492,80 @@ def _sample_targeted_pid_gains(
     return float(candidate[0]), float(candidate[1]), float(candidate[2]), "boundary_search"
 
 
+def _sample_oscillatory_pid_gains(
+    rng: np.random.Generator,
+    plant: Plant,
+    config: DatasetConfig,
+    sampled_gains: list[dict[str, Any]],
+) -> tuple[float, float, float, str]:
+    low_bounds, high_bounds, base_scales = _gain_bounds(plant, config)
+    stable_anchor = _find_stable_anchor(rng, plant, config, sampled_gains, base_scales, low_bounds)
+    unstable_anchor = _find_unstable_anchor(
+        rng,
+        plant,
+        config,
+        sampled_gains,
+        stable_anchor,
+        low_bounds,
+        high_bounds,
+    )
+    if unstable_anchor is None:
+        return _sample_boundary_pid_gains(rng, plant, config, sampled_gains)
+
+    stable_log = np.log(np.clip(stable_anchor, low_bounds, high_bounds))
+    unstable_log = np.log(np.clip(unstable_anchor, low_bounds, high_bounds))
+    best_stable: tuple[float, np.ndarray] | None = None
+    best_unstable: tuple[float, np.ndarray] | None = None
+
+    for _ in range(config.oscillatory_candidate_count):
+        alpha = float(
+            np.clip(
+                rng.normal(
+                    config.oscillatory_boundary_bias,
+                    config.oscillatory_boundary_std,
+                ),
+                0.45,
+                0.98,
+            )
+        )
+        sample_log = ((1.0 - alpha) * stable_log) + (alpha * unstable_log)
+        sample_log += rng.normal(0.0, config.oscillatory_jitter_std, size=3)
+        candidate = np.clip(np.exp(sample_log), low_bounds, high_bounds)
+        characteristics = closed_loop_characteristics(
+            plant,
+            float(candidate[0]),
+            float(candidate[1]),
+            float(candidate[2]),
+            config.derivative_filter_tau,
+        )
+        boundary_proximity = 1.0 / max(abs(characteristics.stability_margin), 1e-4)
+        score = (
+            1.6 * np.log1p(characteristics.dominant_oscillation_hz)
+            + 1.1 * (1.0 - min(characteristics.min_damping_ratio, 1.0))
+            + 0.25 * np.log1p(plant.max_oscillation_hz)
+            + 0.35 * boundary_proximity
+        )
+        if characteristics.stability_margin < -1e-6:
+            if best_stable is None or score > best_stable[0]:
+                best_stable = (score, candidate)
+        else:
+            if best_unstable is None or score > best_unstable[0]:
+                best_unstable = (score, candidate)
+
+    if best_stable is not None:
+        candidate = best_stable[1]
+        return float(candidate[0]), float(candidate[1]), float(candidate[2]), "oscillatory_target"
+    if best_unstable is not None:
+        candidate = best_unstable[1]
+        return (
+            float(candidate[0]),
+            float(candidate[1]),
+            float(candidate[2]),
+            "oscillatory_unstable_target",
+        )
+    return _sample_boundary_pid_gains(rng, plant, config, sampled_gains)
+
+
 def _find_stable_anchor(
     rng: np.random.Generator,
     plant: Plant,
@@ -381,7 +589,7 @@ def _find_stable_anchor(
     ):
         return candidate
 
-    for scale in [0.7, 0.5, 0.35, 0.2, 0.1, 0.05]:
+    for scale in [0.8, 0.6, 0.45, 0.3, 0.2, 0.1, 0.05]:
         candidate = np.clip(base_scales * scale, low_bounds, None)
         if closed_loop_is_stable(
             plant,
@@ -412,10 +620,10 @@ def _find_unstable_anchor(
     candidate_sources = stable_records or [
         {"kp": stable_anchor[0], "ki": stable_anchor[1], "kd": stable_anchor[2]}
     ]
-    for _ in range(12):
+    for _ in range(16):
         source = candidate_sources[int(rng.integers(0, len(candidate_sources)))]
         source_gains = np.asarray([source["kp"], source["ki"], source["kd"]], dtype=np.float64)
-        amplification = np.exp(np.abs(rng.normal(loc=0.8, scale=0.45, size=3)))
+        amplification = np.exp(np.abs(rng.normal(loc=0.9, scale=0.55, size=3)))
         candidate = np.clip(source_gains * amplification, low_bounds, high_bounds)
         if not closed_loop_is_stable(
             plant,
@@ -449,16 +657,16 @@ def _apply_result_safety_filters(
 
     trajectory_peak_abs = float(np.max(np.abs(result.trajectory)))
     final_value = float(result.trajectory[-1])
+    if not np.isfinite(trajectory_peak_abs) or not np.isfinite(final_value):
+        return False, "non_finite_response", trajectory_peak_abs, final_value
     if trajectory_peak_abs > config.max_abs_trajectory:
         return False, "trajectory_limit_exceeded", trajectory_peak_abs, final_value
-    if (result.peak_control_effort or 0.0) > config.max_peak_control_effort:
-        return False, "control_effort_limit_exceeded", trajectory_peak_abs, final_value
     return True, "", trajectory_peak_abs, final_value
 
 
-def _validate_chunk_health(frame: pd.DataFrame) -> None:
+def _validate_chunk_health(frame: pd.DataFrame, config: DatasetConfig) -> None:
     unstable_fraction = 1.0 - float(frame["stable"].mean())
-    if unstable_fraction > 0.5:
+    if unstable_fraction > config.max_unstable_fraction_abort:
         raise RuntimeError(
             f"Chunk unstable fraction exceeded safety threshold: {unstable_fraction:.3f}"
         )
@@ -478,35 +686,11 @@ def _validate_chunk_health(frame: pd.DataFrame) -> None:
         )
 
 
-def _validate_dataset_health(
-    samples: pd.DataFrame,
-    trajectories: np.ndarray,
-    config: DatasetConfig,
-) -> None:
-    unstable_fraction = 1.0 - float(samples["stable"].mean())
-    if unstable_fraction > config.max_unstable_fraction_abort:
-        raise RuntimeError(
-            f"Dataset unstable fraction {unstable_fraction:.3f} exceeded limit "
-            f"{config.max_unstable_fraction_abort:.3f}"
-        )
-
-    stable_mask = samples["stable"].to_numpy(dtype=bool)
-    stable_trajectories = trajectories[stable_mask]
-    if stable_trajectories.size and not np.all(np.isfinite(stable_trajectories)):
-        raise RuntimeError("Stable trajectories contain NaN or infinite values.")
-    if stable_trajectories.size and np.max(np.abs(stable_trajectories)) > config.max_abs_trajectory:
-        raise RuntimeError("Stable trajectories exceeded the configured safe amplitude limit.")
-
-    nonfinite_failures = int((samples["failure_reason"] == "non_finite_response").sum())
-    if nonfinite_failures > 0:
-        raise RuntimeError("Dataset generation produced non-finite responses.")
-
-
 def _build_manifest(config: DatasetConfig) -> dict[str, Any]:
     payload = asdict(config)
     config_hash = hashlib.sha256(repr(sorted(payload.items())).encode("utf-8")).hexdigest()[:16]
     return {
-        "format_version": 2,
+        "format_version": 3,
         "config_hash": config_hash,
         "config": payload,
         "total_chunks": math.ceil(config.n_plants / config.chunk_size_plants),
@@ -539,97 +723,264 @@ def _validate_or_initialize_dataset_dir(
         dump_json(manifest, manifest_path)
 
 
-def _dataset_metadata(
-    config: DatasetConfig,
-    samples: pd.DataFrame,
-    trajectories: np.ndarray,
-) -> dict[str, Any]:
-    split_counts = samples["split"].value_counts().sort_index().to_dict()
-    stable_counts = (
-        samples.groupby("split", dropna=False)["stable"].mean().mul(100.0).round(2).to_dict()
+def _build_plant_split_frame(chunks: list[DatasetChunk], config: DatasetConfig) -> pd.DataFrame:
+    plant_frames = []
+    for chunk in chunks:
+        plant_frames.append(
+            pd.read_parquet(
+                chunk.metadata_path,
+                columns=["plant_id", "plant_family"],
+            ).drop_duplicates()
+        )
+    plants = pd.concat(plant_frames, ignore_index=True).drop_duplicates().sort_values("plant_id")
+    plants["split"] = assign_dataset_splits(
+        plants,
+        val_fraction=config.val_fraction,
+        test_fraction=config.test_fraction,
+        ood_families=config.ood_families,
+        seed=config.seed,
     )
-    family_counts = samples["plant_family"].value_counts().sort_index().to_dict()
-    family_stable = (
-        samples.groupby("plant_family", dropna=False)["stable"].mean().mul(100.0).round(2).to_dict()
-    )
-    failure_reason_counts = (
-        samples.loc[samples["failure_reason"] != "", "failure_reason"].value_counts().to_dict()
-    )
-    stable_mask = samples["stable"].to_numpy(dtype=bool)
-    stable_trajectories = trajectories[stable_mask]
-    trajectory_peak_abs = samples.loc[samples["stable"], "trajectory_peak_abs"].to_numpy(
-        dtype=float
-    )
-    trajectory_stats = {
-        "mean_peak_abs": (
-            float(np.nanmean(trajectory_peak_abs)) if trajectory_peak_abs.size else float("nan")
-        ),
-        "p95_peak_abs": float(np.nanpercentile(trajectory_peak_abs, 95.0))
-        if trajectory_peak_abs.size
-        else float("nan"),
-        "max_peak_abs": (
-            float(np.nanmax(trajectory_peak_abs)) if trajectory_peak_abs.size else float("nan")
-        ),
-        "min_value": (
-            float(np.nanmin(stable_trajectories)) if stable_trajectories.size else float("nan")
-        ),
-        "max_value": (
-            float(np.nanmax(stable_trajectories)) if stable_trajectories.size else float("nan")
-        ),
+    assert_no_plant_leakage(plants[["plant_id", "split"]])
+    return plants.reset_index(drop=True)
+
+
+def _empty_aggregate_state() -> dict[str, Any]:
+    return {
+        "n_samples": 0,
+        "n_plants": set(),
+        "n_time_steps": None,
+        "split_counts": Counter(),
+        "split_stable_sum": Counter(),
+        "family_counts": Counter(),
+        "family_stable_sum": Counter(),
+        "failure_reason_counts": Counter(),
+        "gain_mode_counts": Counter(),
+        "stable_peak_values": [],
+        "stable_oscillation_hz": [],
+        "stable_closed_loop_damping": [],
+        "gain_sample_frames": [],
+        "stable_value_min": float("inf"),
+        "stable_value_max": float("-inf"),
+        "stable_nan_count": 0,
     }
-    gain_mode_counts = samples["gain_sampling_mode"].value_counts().sort_index().to_dict()
+
+
+def _update_aggregate_state(
+    aggregate: dict[str, Any],
+    frame: pd.DataFrame,
+    trajectories: np.ndarray,
+) -> None:
+    aggregate["n_samples"] += int(frame.shape[0])
+    aggregate["n_plants"].update(frame["plant_id"].astype(int).tolist())
+    aggregate["n_time_steps"] = int(trajectories.shape[1])
+
+    split_counts = frame["split"].value_counts().to_dict()
+    for split, count in split_counts.items():
+        aggregate["split_counts"][split] += int(count)
+        stable_fraction = frame.loc[frame["split"] == split, "stable"].sum()
+        aggregate["split_stable_sum"][split] += int(stable_fraction)
+
+    family_counts = frame["plant_family"].value_counts().to_dict()
+    for family, count in family_counts.items():
+        aggregate["family_counts"][family] += int(count)
+        stable_count = frame.loc[frame["plant_family"] == family, "stable"].sum()
+        aggregate["family_stable_sum"][family] += int(stable_count)
+
+    failures = frame.loc[frame["failure_reason"] != "", "failure_reason"].value_counts().to_dict()
+    for reason, count in failures.items():
+        aggregate["failure_reason_counts"][reason] += int(count)
+
+    modes = frame["gain_sampling_mode"].value_counts().to_dict()
+    for mode, count in modes.items():
+        aggregate["gain_mode_counts"][mode] += int(count)
+
+    stable_mask = frame["stable"].to_numpy(dtype=bool)
+    if np.any(stable_mask):
+        stable_trajectories = trajectories[stable_mask]
+        aggregate["stable_nan_count"] += int(np.isnan(stable_trajectories).sum())
+        aggregate["stable_value_min"] = min(
+            aggregate["stable_value_min"],
+            float(np.nanmin(stable_trajectories)),
+        )
+        aggregate["stable_value_max"] = max(
+            aggregate["stable_value_max"],
+            float(np.nanmax(stable_trajectories)),
+        )
+        aggregate["stable_peak_values"].append(
+            frame.loc[stable_mask, "trajectory_peak_abs"].to_numpy(dtype=np.float32)
+        )
+        aggregate["stable_oscillation_hz"].append(
+            frame.loc[stable_mask, "closed_loop_oscillation_hz"].to_numpy(dtype=np.float32)
+        )
+        aggregate["stable_closed_loop_damping"].append(
+            frame.loc[stable_mask, "closed_loop_min_damping_ratio"].to_numpy(dtype=np.float32)
+        )
+
+    gain_frame = frame[
+        [
+            "kp",
+            "ki",
+            "kd",
+            "stable",
+            "gain_sampling_mode",
+            "plant_family",
+            "plant_order",
+            "plant_min_damping_ratio",
+            "closed_loop_oscillation_hz",
+        ]
+    ]
+    if gain_frame.shape[0] > 2_000:
+        gain_frame = gain_frame.sample(2_000, random_state=42 + int(frame["plant_id"].iloc[0]))
+    aggregate["gain_sample_frames"].append(gain_frame.reset_index(drop=True))
+
+
+def _validate_dataset_health(aggregate: dict[str, Any], config: DatasetConfig) -> None:
+    unstable_fraction = 1.0 - (
+        sum(aggregate["split_stable_sum"].values()) / max(aggregate["n_samples"], 1)
+    )
+    if unstable_fraction > config.max_unstable_fraction_abort:
+        raise RuntimeError(
+            f"Dataset unstable fraction {unstable_fraction:.3f} exceeded limit "
+            f"{config.max_unstable_fraction_abort:.3f}"
+        )
+    if aggregate["stable_nan_count"] > 0:
+        raise RuntimeError("Stable trajectories contain NaN values.")
+    if aggregate["stable_value_max"] > config.max_abs_trajectory:
+        raise RuntimeError("Stable trajectories exceeded the configured safe amplitude limit.")
+    if aggregate["failure_reason_counts"].get("non_finite_response", 0) > 0:
+        raise RuntimeError("Dataset generation produced non-finite responses.")
+
+
+def _aggregate_metadata(config: DatasetConfig, aggregate: dict[str, Any]) -> dict[str, Any]:
+    stable_count = int(sum(aggregate["split_stable_sum"].values()))
+    trajectory_peak_abs = _concatenate_float_arrays(aggregate["stable_peak_values"])
+    stable_oscillation_hz = _concatenate_float_arrays(aggregate["stable_oscillation_hz"])
+    stable_damping = _concatenate_float_arrays(aggregate["stable_closed_loop_damping"])
+
+    split_stable_fraction = {}
+    for split, count in aggregate["split_counts"].items():
+        split_stable_fraction[split] = round(
+            (aggregate["split_stable_sum"][split] / max(count, 1)) * 100.0,
+            2,
+        )
+
+    family_stable_fraction = {}
+    for family, count in aggregate["family_counts"].items():
+        family_stable_fraction[family] = round(
+            (aggregate["family_stable_sum"][family] / max(count, 1)) * 100.0,
+            2,
+        )
+
     return {
         "name": config.name,
-        "n_samples": int(samples.shape[0]),
-        "n_plants": int(samples["plant_id"].nunique()),
-        "n_time_steps": int(trajectories.shape[1]),
-        "stable_fraction_pct": round(float(samples["stable"].mean() * 100.0), 2),
-        "split_counts": {key: int(value) for key, value in split_counts.items()},
-        "split_stable_fraction_pct": {key: float(value) for key, value in stable_counts.items()},
-        "family_counts": {key: int(value) for key, value in family_counts.items()},
-        "family_stable_fraction_pct": {key: float(value) for key, value in family_stable.items()},
-        "failure_reason_counts": {key: int(value) for key, value in failure_reason_counts.items()},
-        "gain_sampling_mode_counts": {key: int(value) for key, value in gain_mode_counts.items()},
-        "trajectory_stats": trajectory_stats,
+        "n_samples": int(aggregate["n_samples"]),
+        "n_plants": int(len(aggregate["n_plants"])),
+        "n_time_steps": int(aggregate["n_time_steps"] or config.n_time_steps),
+        "stable_fraction_pct": round((stable_count / max(aggregate["n_samples"], 1)) * 100.0, 2),
+        "split_counts": {key: int(value) for key, value in aggregate["split_counts"].items()},
+        "split_stable_fraction_pct": split_stable_fraction,
+        "family_counts": {key: int(value) for key, value in aggregate["family_counts"].items()},
+        "family_stable_fraction_pct": family_stable_fraction,
+        "failure_reason_counts": {
+            key: int(value) for key, value in aggregate["failure_reason_counts"].items()
+        },
+        "gain_sampling_mode_counts": {
+            key: int(value) for key, value in aggregate["gain_mode_counts"].items()
+        },
+        "trajectory_stats": {
+            "mean_peak_abs": float(np.nanmean(trajectory_peak_abs))
+            if trajectory_peak_abs.size
+            else float("nan"),
+            "p95_peak_abs": float(np.nanpercentile(trajectory_peak_abs, 95.0))
+            if trajectory_peak_abs.size
+            else float("nan"),
+            "max_peak_abs": float(np.nanmax(trajectory_peak_abs))
+            if trajectory_peak_abs.size
+            else float("nan"),
+            "min_value": float(aggregate["stable_value_min"])
+            if np.isfinite(aggregate["stable_value_min"])
+            else float("nan"),
+            "max_value": float(aggregate["stable_value_max"])
+            if np.isfinite(aggregate["stable_value_max"])
+            else float("nan"),
+            "oscillation_frequency_hz_p95": float(np.nanpercentile(stable_oscillation_hz, 95.0))
+            if stable_oscillation_hz.size
+            else float("nan"),
+            "oscillation_frequency_hz_max": float(np.nanmax(stable_oscillation_hz))
+            if stable_oscillation_hz.size
+            else float("nan"),
+            "closed_loop_damping_p05": float(np.nanpercentile(stable_damping, 5.0))
+            if stable_damping.size
+            else float("nan"),
+        },
         "ood_families": list(config.ood_families),
         "families": list(config.families),
         "controllers_per_plant": config.controllers_per_plant,
         "time_horizon": config.t_final,
         "num_workers": config.num_workers,
+        "write_consolidated_outputs": bool(
+            config.write_consolidated_outputs
+            and (
+                config.n_plants * config.controllers_per_plant
+                <= config.consolidation_sample_limit
+            )
+        ),
     }
 
 
 def _write_dataset_diagnostic_plots(
     config: DatasetConfig,
     dataset_dir: Path,
-    samples: pd.DataFrame,
-    trajectories: np.ndarray,
+    aggregate: dict[str, Any],
 ) -> None:
     plots_root = dataset_dir.parent.parent / "plots"
     plots_dir = ensure_dir(plots_root / config.name)
-    stable_mask = samples["stable"].to_numpy(dtype=bool)
-    stable_trajectories = trajectories[stable_mask]
+    sample_frame = (
+        pd.concat(aggregate["gain_sample_frames"], ignore_index=True)
+        if aggregate["gain_sample_frames"]
+        else pd.DataFrame()
+    )
+    family_summary = pd.DataFrame(
+        {
+            "plant_family": list(aggregate["family_counts"].keys()),
+            "stable_fraction_pct": [
+                (aggregate["family_stable_sum"][family] / max(count, 1)) * 100.0
+                for family, count in aggregate["family_counts"].items()
+            ],
+        }
+    )
+    peak_values = _concatenate_float_arrays(aggregate["stable_peak_values"])
+    oscillation_hz = _concatenate_float_arrays(aggregate["stable_oscillation_hz"])
 
-    plot_dataset_family_stability(
-        samples,
-        output_path=plots_dir / "family_stability.png",
-        title=f"Stable Fraction By Family: {config.name}",
-    )
-    plot_gain_distributions(
-        samples,
-        output_path=plots_dir / "gain_distributions.png",
-        title=f"PID Gain Distributions: {config.name}",
-    )
+    if not family_summary.empty:
+        plot_dataset_family_stability(
+            family_summary,
+            output_path=plots_dir / "family_stability.png",
+            title=f"Stable Fraction By Family: {config.name}",
+        )
+    if not sample_frame.empty:
+        plot_gain_distributions(
+            sample_frame,
+            output_path=plots_dir / "gain_distributions.png",
+            title=f"PID Gain Distributions: {config.name}",
+        )
     plot_trajectory_amplitudes(
-        samples.loc[samples["stable"], "trajectory_peak_abs"].to_numpy(dtype=float),
+        peak_values,
         output_path=plots_dir / "trajectory_peak_abs.png",
         title=f"Stable Trajectory Peak Amplitudes: {config.name}",
+    )
+    plot_oscillation_frequency_distribution(
+        oscillation_hz,
+        output_path=plots_dir / "oscillation_frequency_hz.png",
+        title=f"Stable Closed-Loop Oscillation Frequency: {config.name}",
     )
 
     diagnostics = {
         "plots_dir": str(plots_dir),
-        "stable_trajectory_count": int(stable_trajectories.shape[0]),
-        "nan_placeholder_trajectory_count": int((~stable_mask).sum()),
+        "stable_trajectory_count": int(sum(aggregate["split_stable_sum"].values())),
+        "nan_placeholder_trajectory_count": int(
+            aggregate["n_samples"] - sum(aggregate["split_stable_sum"].values())
+        ),
     }
     dump_json(diagnostics, dataset_dir / "diagnostics.json")
 
@@ -672,3 +1023,9 @@ def _gain_bounds(
         dtype=np.float64,
     )
     return base_scales * low_multipliers, base_scales * high_multipliers, base_scales
+
+
+def _concatenate_float_arrays(values: list[np.ndarray]) -> np.ndarray:
+    if not values:
+        return np.array([], dtype=np.float32)
+    return np.concatenate(values).astype(np.float32)
