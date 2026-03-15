@@ -1,0 +1,7 @@
+name: full_mlp_v2
+dataset_dir: artifacts/datasets/full_v2
+run_dir: artifacts/runs/full_mlp_v2
+output_dir: reports/evaluations
+benchmark_batch_size: 128
+benchmark_single_repeats: 250
+benchmark_batch_repeats: 40

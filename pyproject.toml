@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "controlsimulator"
+version = "0.1.0"
+description = "Surrogate modeling for PID-controlled continuous-time systems"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "matplotlib>=3.10",
+  "numpy>=2.2",
+  "pandas>=2.3",
+  "pyyaml>=6.0.2",
+  "scikit-learn>=1.7",
+  "scipy>=1.15",
+  "torch>=2.8",
+  "tqdm>=4.67",
+]
+
+[project.scripts]
+controlsimulator = "controlsimulator.cli:main"
+
+[dependency-groups]
+dev = [
+  "pre-commit>=4.3",
+  "pytest>=8.4",
+  "ruff>=0.12",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "F",
+  "I",
+  "N",
+  "UP",
+  "B",
+  "SIM",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

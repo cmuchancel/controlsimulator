@@ -1,0 +1,7 @@
+name: smoke_mlp_v2
+dataset_dir: artifacts/datasets/smoke_v2
+run_dir: artifacts/runs/smoke_mlp_v2
+output_dir: reports/evaluations
+benchmark_batch_size: 64
+benchmark_single_repeats: 120
+benchmark_batch_repeats: 20

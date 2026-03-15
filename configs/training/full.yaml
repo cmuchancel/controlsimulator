@@ -1,0 +1,14 @@
+name: full_mlp_v2
+dataset_dir: artifacts/datasets/full_v2
+output_dir: artifacts/runs
+seed: 42
+device: auto
+batch_size: 512
+epochs: 60
+patience: 10
+learning_rate: 0.001
+weight_decay: 0.0001
+hidden_sizes: [256, 256, 256]
+classifier_hidden_sizes: [128, 128]
+dropout: 0.1
+classifier_dropout: 0.1

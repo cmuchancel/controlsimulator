@@ -1,0 +1,21 @@
+name: smoke_v2
+seed: 42
+output_dir: artifacts/datasets
+n_plants: 180
+controllers_per_plant: 12
+families:
+  - first_order
+  - second_order
+  - third_order
+  - lightly_damped_second_order
+ood_families:
+  - lightly_damped_second_order
+t_final: 8.0
+n_time_steps: 160
+derivative_filter_tau: 0.05
+chunk_size_plants: 30
+val_fraction: 0.15
+test_fraction: 0.15
+kp_multiplier_range: [0.02, 50.0]
+ki_multiplier_range: [0.01, 80.0]
+kd_multiplier_range: [0.001, 25.0]
