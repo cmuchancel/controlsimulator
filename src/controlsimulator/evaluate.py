@@ -50,42 +50,6 @@ RAW_FEATURE_COLUMNS = [
     *PLANT_FEATURE_COLUMNS,
     *[column for column in GAIN_FEATURE_COLUMNS if not column.startswith("log10_")],
 ]
-CLASSIFIER_COLUMNS = list(
-    dict.fromkeys(
-        [
-            *RAW_FEATURE_COLUMNS,
-            "sample_id",
-            "plant_id",
-            "plant_family",
-            "plant_order",
-            "stable",
-            "split",
-            "tau_d",
-            "kp",
-            "ki",
-            "kd",
-        ]
-    )
-)
-REGRESSOR_COLUMNS = list(
-    dict.fromkeys(
-        [
-            *RAW_FEATURE_COLUMNS,
-            "sample_id",
-            "plant_id",
-            "plant_family",
-            "plant_order",
-            "stable",
-            "split",
-            "tau_d",
-            "kp",
-            "ki",
-            "kd",
-            "plant_min_damping_ratio",
-            "closed_loop_oscillation_hz",
-        ]
-    )
-)
 
 
 @dataclass(slots=True)
@@ -96,6 +60,7 @@ class LoadedModels:
     trajectory_scaler: Standardizer
     mean_trajectory: np.ndarray
     device: str
+    feature_columns: list[str]
 
 
 @dataclass(slots=True)
@@ -190,6 +155,46 @@ class RegressionAccumulator:
         return summary
 
 
+def _raw_feature_columns_for(feature_columns: list[str]) -> list[str]:
+    return [column for column in feature_columns if not column.startswith("log10_")]
+
+
+def _classifier_columns_for(feature_columns: list[str]) -> list[str]:
+    return list(
+        dict.fromkeys(
+            [
+                *_raw_feature_columns_for(feature_columns),
+                "sample_id",
+                "plant_id",
+                "plant_family",
+                "plant_order",
+                "stable",
+                "split",
+                "tau_d",
+                "kp",
+                "ki",
+                "kd",
+            ]
+        )
+    )
+
+
+def _regressor_columns_for(feature_columns: list[str]) -> list[str]:
+    return list(
+        dict.fromkeys(
+            [
+                *_classifier_columns_for(feature_columns),
+                "plant_min_damping_ratio",
+                "closed_loop_oscillation_hz",
+            ]
+        )
+    )
+
+
+def _log_evaluation_stage(message: str) -> None:
+    print(message, flush=True)
+
+
 def load_models(run_dir: str | Path, device: str = "auto") -> LoadedModels:
     resolved = resolve_path(run_dir)
     model_device = pick_device(device)
@@ -200,6 +205,7 @@ def load_models(run_dir: str | Path, device: str = "auto") -> LoadedModels:
         input_dim=int(classifier_payload["input_dim"]),
         hidden_sizes=list(classifier_payload["hidden_sizes"]),
         dropout=float(classifier_payload["dropout"]),
+        activation=str(classifier_payload.get("activation", "gelu")),
     ).to(model_device)
     classifier.load_state_dict(classifier_payload["model_state"])
     classifier.eval()
@@ -209,6 +215,7 @@ def load_models(run_dir: str | Path, device: str = "auto") -> LoadedModels:
         output_dim=int(regressor_payload["output_dim"]),
         hidden_sizes=list(regressor_payload["hidden_sizes"]),
         dropout=float(regressor_payload["dropout"]),
+        activation=str(regressor_payload.get("activation", "gelu")),
     ).to(model_device)
     regressor.load_state_dict(regressor_payload["model_state"])
     regressor.eval()
@@ -220,6 +227,7 @@ def load_models(run_dir: str | Path, device: str = "auto") -> LoadedModels:
         trajectory_scaler=Standardizer.from_dict(regressor_payload["trajectory_scaler"]),
         mean_trajectory=np.load(resolved / "mean_trajectory.npy"),
         device=model_device,
+        feature_columns=list(classifier_payload.get("feature_columns", FEATURE_COLUMNS)),
     )
 
 
@@ -236,6 +244,7 @@ def evaluate_models(config: EvaluationConfig) -> Path:
     majority_baseline_prediction = int(
         metadata["split_stable_fraction_pct"].get("train", 0.0) >= 50.0
     )
+    _log_evaluation_stage(f"[eval] knn-baseline {config.name}")
     knn_baseline = _build_knn_baseline(
         dataset_dir=dataset_dir,
         models=models,
@@ -243,7 +252,7 @@ def evaluate_models(config: EvaluationConfig) -> Path:
     )
 
     evaluation: dict[str, Any] = {
-        "feature_columns": FEATURE_COLUMNS,
+        "feature_columns": models.feature_columns,
         "classifier": {},
         "regressor": {},
     }
@@ -252,6 +261,7 @@ def evaluate_models(config: EvaluationConfig) -> Path:
     family_rows: list[dict[str, Any]] = []
 
     for split in ["test", "ood_test"]:
+        _log_evaluation_stage(f"[eval] split {config.name} {split}")
         classifier_true: list[np.ndarray] = []
         classifier_pred: list[np.ndarray] = []
 
@@ -263,10 +273,11 @@ def evaluate_models(config: EvaluationConfig) -> Path:
             dataset_dir,
             include_trajectories=True,
             splits={split},
-            columns=REGRESSOR_COLUMNS,
+            columns=_regressor_columns_for(models.feature_columns),
+            progress_desc=f"eval:{config.name}:{split}",
         ):
             features = models.feature_scaler.transform(
-                feature_matrix(frame[RAW_FEATURE_COLUMNS])
+                feature_matrix(frame, feature_columns=models.feature_columns)
             ).astype(np.float32)
             stability_probabilities = predict_stability_probabilities(
                 models.classifier,
@@ -350,6 +361,12 @@ def evaluate_models(config: EvaluationConfig) -> Path:
             baseline_labels,
         )
         evaluation["regressor"][split] = split_accumulator.summary()
+        _log_evaluation_stage(
+            "[eval] complete "
+            f"{config.name} {split} "
+            f"clf_f1={evaluation['classifier'][split]['f1']:.4f} "
+            f"traj_rmse={evaluation['regressor'][split]['trajectory_rmse']:.4f}"
+        )
 
         matrix = confusion_matrix(true_labels, predicted_labels, labels=[0, 1])
         confusion_path = plots_dir / f"{split}_stability_confusion.png"
@@ -491,12 +508,15 @@ def evaluate_models(config: EvaluationConfig) -> Path:
             title=f"Trajectory Prediction Examples: {split}",
         )
         shutil.copy2(response_path, artifact_plots_dir / response_path.name)
+        shutil.copy2(response_path, artifact_plots_dir / f"{split}_hard_case_diagnostics.png")
 
     evaluation["artifacts_plot_dir"] = str(artifact_plots_dir)
     evaluation["family_metrics_path"] = "family_metrics.csv"
     evaluation["sample_errors_path"] = "sample_errors.csv"
     dump_json(evaluation, report_dir / "evaluation_summary.json")
+    dump_json(evaluation, report_dir / "metrics.json")
     _write_markdown_report(evaluation, report_dir / "evaluation_summary.md")
+    _log_evaluation_stage(f"[eval] complete {config.name}")
     return report_dir
 
 
@@ -515,12 +535,13 @@ def _build_knn_baseline(
         include_trajectories=True,
         splits={"train"},
         stable_only=True,
-        columns=REGRESSOR_COLUMNS,
+        columns=_regressor_columns_for(models.feature_columns),
+        progress_desc=f"eval-knn:{config.name}",
     ):
         if trajectories is None:
             raise RuntimeError("Expected trajectories when building the k-NN baseline.")
         scaled_features = models.feature_scaler.transform(
-            feature_matrix(frame[RAW_FEATURE_COLUMNS])
+            feature_matrix(frame, feature_columns=models.feature_columns)
         ).astype(np.float32)
         for feature_row, trajectory in zip(scaled_features, trajectories, strict=False):
             seen += 1
@@ -627,7 +648,9 @@ def _plot_boundary_slice_for_split(
             grid_rows.append(_plant_feature_row(anchor_row, float(kp), float(ki), fixed_kd))
 
     grid_frame = pd.DataFrame(grid_rows)
-    grid_features = models.feature_scaler.transform(feature_matrix(grid_frame)).astype(np.float32)
+    grid_features = models.feature_scaler.transform(
+        feature_matrix(grid_frame, feature_columns=models.feature_columns)
+    ).astype(np.float32)
     predicted_probability = predict_stability_probabilities(
         models.classifier,
         grid_features,
@@ -653,14 +676,22 @@ def _plant_feature_row(
     ki: float,
     kd: float,
 ) -> dict[str, Any]:
+    a2 = float(anchor_row.get("a2", anchor_row.get("den_2", 0.0)))
+    a1 = float(anchor_row.get("a1", anchor_row.get("den_3", 0.0)))
+    a0 = float(anchor_row.get("a0", anchor_row.get("den_4", 1.0)))
+    b0 = float(anchor_row.get("b0", anchor_row.get("num_2", 1.0)))
     row = {
         "kp": kp,
         "ki": ki,
         "kd": kd,
-        "dc_gain": float(anchor_row["dc_gain"]),
-        "dominant_pole_mag": float(anchor_row["dominant_pole_mag"]),
-        "mean_pole_mag": float(anchor_row["mean_pole_mag"]),
-        "plant_order": int(anchor_row["plant_order"]),
+        "b0": b0,
+        "a2": a2,
+        "a1": a1,
+        "a0": a0,
+        "dc_gain": float(anchor_row.get("dc_gain", b0 / max(abs(a0), 1e-8))),
+        "dominant_pole_mag": float(anchor_row.get("dominant_pole_mag", 1.0)),
+        "mean_pole_mag": float(anchor_row.get("mean_pole_mag", 1.0)),
+        "plant_order": int(anchor_row.get("plant_order", 3)),
         "plant_min_damping_ratio": float(anchor_row.get("plant_min_damping_ratio", 1.0)),
         "plant_max_oscillation_hz": float(anchor_row.get("plant_max_oscillation_hz", 0.0)),
         "plant_pole_spread_log10": float(anchor_row.get("plant_pole_spread_log10", 0.0)),
@@ -703,7 +734,8 @@ def _representative_cases_for_split(
         include_trajectories=True,
         splits={split},
         stable_only=True,
-        columns=REGRESSOR_COLUMNS,
+        columns=_regressor_columns_for(models.feature_columns),
+        progress_desc=f"eval-cases:{dataset_dir.name}:{split}",
     ):
         if trajectories is None:
             raise RuntimeError("Expected trajectories for representative-case retrieval.")
@@ -714,7 +746,7 @@ def _representative_cases_for_split(
         selected_frame = frame.loc[mask].reset_index(drop=True)
         selected_truth = trajectories[mask]
         selected_features = models.feature_scaler.transform(
-            feature_matrix(selected_frame[RAW_FEATURE_COLUMNS])
+            feature_matrix(selected_frame, feature_columns=models.feature_columns)
         ).astype(np.float32)
         selected_predictions = predict_trajectories(
             models.regressor,

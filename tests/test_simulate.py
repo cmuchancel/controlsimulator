@@ -22,6 +22,8 @@ def test_closed_loop_simulation_known_case() -> None:
         max_oscillation_hz=0.0,
         pole_spread_log10=0.0,
         has_complex_poles=False,
+        max_real_part=-1.0,
+        min_real_part=-1.0,
     )
     time_grid = np.linspace(0.0, 8.0, 200, dtype=np.float32)
     result = simulate_closed_loop(

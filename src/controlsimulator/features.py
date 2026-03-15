@@ -23,6 +23,11 @@ PLANT_FEATURE_COLUMNS = [
 ]
 GAIN_FEATURE_COLUMNS = ["kp", "ki", "kd", "log10_kp", "log10_ki", "log10_kd"]
 FEATURE_COLUMNS = [*PLANT_FEATURE_COLUMNS, *GAIN_FEATURE_COLUMNS]
+CAMPAIGN_CORE_FEATURE_COLUMNS = ["b0", "a2", "a1", "a0", "kp", "ki", "kd"]
+FEATURE_SET_REGISTRY = {
+    "full": FEATURE_COLUMNS,
+    "campaign_core": CAMPAIGN_CORE_FEATURE_COLUMNS,
+}
 
 
 @dataclass(slots=True)
@@ -94,28 +99,58 @@ class RunningStatistics:
 def _ensure_feature_columns(samples: pd.DataFrame) -> pd.DataFrame:
     feature_frame = samples.copy()
     defaults = {
+        "b0": 1.0,
+        "a2": 0.0,
+        "a1": 0.0,
+        "a0": 1.0,
         "plant_min_damping_ratio": 1.0,
         "plant_max_oscillation_hz": 0.0,
         "plant_pole_spread_log10": 0.0,
         "plant_has_complex_poles": 0.0,
     }
-    for column in FEATURE_COLUMNS:
+    for column in {column for values in FEATURE_SET_REGISTRY.values() for column in values}:
         if column in feature_frame.columns:
+            continue
+        if column == "b0" and "num_2" in feature_frame.columns:
+            feature_frame[column] = feature_frame["num_2"]
+            continue
+        if column == "a2" and "den_2" in feature_frame.columns:
+            feature_frame[column] = feature_frame["den_2"]
+            continue
+        if column == "a1" and "den_3" in feature_frame.columns:
+            feature_frame[column] = feature_frame["den_3"]
+            continue
+        if column == "a0" and "den_4" in feature_frame.columns:
+            feature_frame[column] = feature_frame["den_4"]
             continue
         feature_frame[column] = defaults.get(column, 0.0)
     return feature_frame
 
 
-def build_feature_table(samples: pd.DataFrame) -> pd.DataFrame:
+def resolve_feature_columns(feature_set: str) -> list[str]:
+    try:
+        return list(FEATURE_SET_REGISTRY[feature_set])
+    except KeyError as error:
+        raise ValueError(f"Unknown feature set: {feature_set}") from error
+
+
+def build_feature_table(
+    samples: pd.DataFrame,
+    feature_columns: list[str] | None = None,
+) -> pd.DataFrame:
     feature_frame = _ensure_feature_columns(samples)
-    feature_frame["log10_kp"] = np.log10(np.clip(feature_frame["kp"], 1e-8, None))
-    feature_frame["log10_ki"] = np.log10(np.clip(feature_frame["ki"], 1e-8, None))
-    feature_frame["log10_kd"] = np.log10(np.clip(feature_frame["kd"], 1e-8, None))
+    selected_columns = feature_columns or FEATURE_COLUMNS
+    if "log10_kp" in selected_columns:
+        feature_frame["log10_kp"] = np.log10(np.clip(feature_frame["kp"], 1e-8, None))
+    if "log10_ki" in selected_columns:
+        feature_frame["log10_ki"] = np.log10(np.clip(feature_frame["ki"], 1e-8, None))
+    if "log10_kd" in selected_columns:
+        feature_frame["log10_kd"] = np.log10(np.clip(feature_frame["kd"], 1e-8, None))
     feature_frame["plant_has_complex_poles"] = feature_frame["plant_has_complex_poles"].astype(
         float
     )
-    return feature_frame[FEATURE_COLUMNS]
+    return feature_frame[selected_columns]
 
 
-def feature_matrix(samples: pd.DataFrame) -> np.ndarray:
-    return build_feature_table(samples).to_numpy(dtype=np.float32)
+def feature_matrix(samples: pd.DataFrame, feature_columns: list[str] | None = None) -> np.ndarray:
+    return build_feature_table(samples, feature_columns=feature_columns).to_numpy(dtype=np.float32)

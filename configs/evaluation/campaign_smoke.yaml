@@ -1,0 +1,11 @@
+name: campaign_smoke
+dataset_dir: artifacts/datasets/campaign_smoke
+run_dir: artifacts/runs/campaign_smoke
+output_dir: reports/evaluations
+benchmark_batch_size: 32
+benchmark_single_repeats: 8
+benchmark_batch_repeats: 3
+inference_batch_size: 512
+knn_neighbors: 1
+knn_train_cap: 2048
+knn_seed: 7

@@ -38,6 +38,18 @@ Full v4 workflow:
 make overnight
 ```
 
+Third-order campaign smoke workflow:
+
+```bash
+make campaign-smoke
+```
+
+Third-order overnight campaign:
+
+```bash
+make overnight-campaign
+```
+
 Direct CLI:
 
 ```bash
@@ -57,6 +69,18 @@ Full workflow:
 - dataset config: `configs/datasets/full_v4.yaml`
 - train config: `configs/training/training_v4.yaml`
 - eval config: `configs/evaluation/evaluation_v4.yaml`
+
+Third-order campaign workflow:
+
+- dataset config: `configs/datasets/third_order_campaign.yaml`
+- train config: `configs/training/third_order_campaign.yaml`
+- eval config: `configs/evaluation/third_order_campaign.yaml`
+
+Third-order campaign smoke workflow:
+
+- dataset config: `configs/datasets/campaign_smoke.yaml`
+- train config: `configs/training/campaign_smoke.yaml`
+- eval config: `configs/evaluation/campaign_smoke.yaml`
 
 Generated datasets live under `artifacts/datasets/`. Runs and checkpoints live under `artifacts/runs/`. Diagnostic plots are mirrored into `artifacts/plots/`. These directories are gitignored. Committed evaluation summaries and plots live under `reports/evaluations/`.
 

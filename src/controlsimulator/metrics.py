@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 
 import numpy as np
+from scipy.signal import find_peaks
 
 
 @dataclass(slots=True)
@@ -11,6 +12,7 @@ class ResponseMetrics:
     rise_time: float
     settling_time: float
     steady_state_error: float
+    oscillation_frequency_estimate_hz: float
     peak_control_effort: float | None = None
 
     def to_dict(self) -> dict[str, float | None]:
@@ -31,9 +33,10 @@ def extract_response_metrics(
 
     final_value = float(trajectory[-1])
     steady_state_error = abs(target - final_value)
+    overshoot_reference = max(abs(final_value), 1e-8)
     overshoot_pct = max(
         0.0,
-        ((float(np.max(trajectory)) - target) / max(abs(target), 1e-8)) * 100.0,
+        ((float(np.max(trajectory)) - final_value) / overshoot_reference) * 100.0,
     )
 
     lower_level = rise_lower * target
@@ -55,11 +58,22 @@ def extract_response_metrics(
     else:
         settling_time = float(time_grid[outside[-1] + 1])
 
+    peak_indices, _ = find_peaks(trajectory)
+    if peak_indices.size >= 2:
+        peak_times = time_grid[peak_indices]
+        mean_period = float(np.mean(np.diff(peak_times)))
+        oscillation_frequency_estimate_hz = (
+            float(1.0 / mean_period) if mean_period > 1e-8 else float("nan")
+        )
+    else:
+        oscillation_frequency_estimate_hz = float("nan")
+
     return ResponseMetrics(
         overshoot_pct=overshoot_pct,
         rise_time=rise_time,
         settling_time=settling_time,
         steady_state_error=steady_state_error,
+        oscillation_frequency_estimate_hz=oscillation_frequency_estimate_hz,
         peak_control_effort=peak_control_effort,
     )
 

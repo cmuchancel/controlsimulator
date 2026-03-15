@@ -1,0 +1,11 @@
+name: third_order_campaign_10m
+dataset_dir: artifacts/datasets/third_order_campaign_10m
+run_dir: artifacts/runs/third_order_campaign_10m
+output_dir: reports/evaluations
+benchmark_batch_size: 256
+benchmark_single_repeats: 120
+benchmark_batch_repeats: 24
+inference_batch_size: 8192
+knn_neighbors: 1
+knn_train_cap: 50000
+knn_seed: 42

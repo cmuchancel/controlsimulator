@@ -5,6 +5,7 @@ from time import perf_counter
 from typing import Any
 
 import numpy as np
+from tqdm import tqdm
 
 from controlsimulator.config import EvaluationConfig
 from controlsimulator.dataset import dataset_time_grid, iter_dataset_chunks
@@ -24,12 +25,32 @@ RAW_FEATURE_COLUMNS = [
 ]
 
 
+def _benchmark_columns(feature_columns: list[str]) -> list[str]:
+    raw_columns = [column for column in feature_columns if not column.startswith("log10_")]
+    return [
+        *raw_columns,
+        "sample_id",
+        "plant_id",
+        "tau_d",
+        "kp",
+        "ki",
+        "kd",
+        "stable",
+        "split",
+    ]
+
+
+def _log_benchmark_stage(message: str) -> None:
+    print(message, flush=True)
+
+
 def benchmark_models(config: EvaluationConfig) -> Path:
     dataset_dir = resolve_path(config.dataset_dir)
     time_grid = dataset_time_grid(dataset_dir)
     models = load_models(config.run_dir)
     report_dir = ensure_dir(resolve_path(config.report_dir()))
 
+    _log_benchmark_stage(f"[benchmark] load {config.name}")
     stable_test_frame = None
     stable_test_trajectories = None
     for frame, trajectories in iter_dataset_chunks(
@@ -37,17 +58,8 @@ def benchmark_models(config: EvaluationConfig) -> Path:
         include_trajectories=True,
         splits={"test"},
         stable_only=True,
-        columns=[
-            *RAW_FEATURE_COLUMNS,
-            "sample_id",
-            "plant_id",
-            "tau_d",
-            "kp",
-            "ki",
-            "kd",
-            "stable",
-            "split",
-        ],
+        columns=_benchmark_columns(models.feature_columns),
+        progress_desc=f"benchmark-load:{config.name}",
     ):
         stable_test_frame = frame
         stable_test_trajectories = trajectories
@@ -57,12 +69,13 @@ def benchmark_models(config: EvaluationConfig) -> Path:
 
     batch_frame = stable_test_frame.iloc[: config.benchmark_batch_size].copy()
     batch_features = models.feature_scaler.transform(
-        feature_matrix(batch_frame[RAW_FEATURE_COLUMNS])
+        feature_matrix(batch_frame, feature_columns=models.feature_columns)
     ).astype(np.float32)
 
     single_sample = batch_frame.iloc[0]
     single_feature = batch_features[:1]
 
+    _log_benchmark_stage(f"[benchmark] single-sim {config.name}")
     single_simulation = _benchmark_repeat(
         lambda: simulate_closed_loop(
             plant=plant_from_sample_row(single_sample),
@@ -73,12 +86,16 @@ def benchmark_models(config: EvaluationConfig) -> Path:
             time_grid=time_grid,
         ),
         config.benchmark_single_repeats,
+        desc=f"benchmark-single-sim:{config.name}",
     )
+    _log_benchmark_stage(f"[benchmark] single-surrogate {config.name}")
     single_surrogate = _benchmark_repeat(
         lambda: _full_surrogate_pass(models, single_feature, config.inference_batch_size),
         config.benchmark_single_repeats,
+        desc=f"benchmark-single-surrogate:{config.name}",
     )
 
+    _log_benchmark_stage(f"[benchmark] batch-sim {config.name}")
     batch_simulation = _benchmark_repeat(
         lambda: [
             simulate_closed_loop(
@@ -92,10 +109,13 @@ def benchmark_models(config: EvaluationConfig) -> Path:
             for index in range(batch_frame.shape[0])
         ],
         config.benchmark_batch_repeats,
+        desc=f"benchmark-batch-sim:{config.name}",
     )
+    _log_benchmark_stage(f"[benchmark] batch-surrogate {config.name}")
     batch_surrogate = _benchmark_repeat(
         lambda: _full_surrogate_pass(models, batch_features, config.inference_batch_size),
         config.benchmark_batch_repeats,
+        desc=f"benchmark-batch-surrogate:{config.name}",
     )
 
     summary = {
@@ -111,6 +131,7 @@ def benchmark_models(config: EvaluationConfig) -> Path:
     }
     dump_json(summary, report_dir / "benchmark_summary.json")
     _write_benchmark_markdown(summary, report_dir / "benchmark_summary.md")
+    _log_benchmark_stage(f"[benchmark] complete {config.name}")
     return report_dir
 
 
@@ -133,10 +154,10 @@ def _full_surrogate_pass(
     return stability_probabilities, trajectories
 
 
-def _benchmark_repeat(function: Any, repeats: int) -> float:
+def _benchmark_repeat(function: Any, repeats: int, *, desc: str) -> float:
     function()
     durations = []
-    for _ in range(repeats):
+    for _ in tqdm(range(repeats), desc=desc, unit="run"):
         start = perf_counter()
         function()
         durations.append(perf_counter() - start)

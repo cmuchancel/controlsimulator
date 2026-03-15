@@ -1,0 +1,46 @@
+name: third_order_campaign_10m
+seed: 42
+output_dir: artifacts/datasets
+n_plants: 250000
+controllers_per_plant: 40
+num_workers: 8
+families:
+  - campaign_third_order_stable
+  - campaign_third_order_oscillatory
+  - campaign_third_order_ood_lightly_damped
+  - campaign_third_order_near_instability
+  - campaign_third_order_unstable
+family_sampling_weights:
+  campaign_third_order_stable: 0.40
+  campaign_third_order_oscillatory: 0.20
+  campaign_third_order_ood_lightly_damped: 0.10
+  campaign_third_order_near_instability: 0.20
+  campaign_third_order_unstable: 0.10
+ood_families:
+  - campaign_third_order_ood_lightly_damped
+t_final: 12.0
+n_time_steps: 1201
+derivative_filter_tau: 0.0
+chunk_size_plants: 500
+val_fraction: 0.15
+test_fraction: 0.15
+controller_mode_weights:
+  random: 0.50
+  aggressive: 0.25
+  integral_heavy: 0.15
+  weak: 0.10
+max_abs_trajectory: 50.0
+trajectory_storage_clip_abs: 200.0
+max_peak_control_effort: 1000.0
+max_unstable_fraction_abort: 0.7
+write_consolidated_outputs: false
+consolidation_sample_limit: 100000
+export_dataset_layout: false
+trajectory_storage_dtype: float16
+near_instability_margin: 0.05
+oscillatory_frequency_threshold_hz: 0.2
+unstable_response_target: 500000
+oscillatory_response_target: 1000000
+near_instability_response_target: 1000000
+quota_resample_batch_plants: 4000
+quota_max_rounds: 48

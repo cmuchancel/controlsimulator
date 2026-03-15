@@ -27,6 +27,7 @@ class SimulationResult:
     peak_control_effort: float | None
     dominant_oscillation_hz: float
     min_damping_ratio: float
+    trajectory_clipped: bool = False
     reason: str | None = None
 
 
@@ -150,6 +151,8 @@ def simulate_closed_loop(
     kd: float,
     tau_d: float,
     time_grid: np.ndarray,
+    trajectory_clip_abs: float | None = None,
+    simulate_unstable: bool = True,
 ) -> SimulationResult:
     (
         controller_num,
@@ -158,7 +161,8 @@ def simulate_closed_loop(
         closed_loop_den,
     ) = closed_loop_transfer_function(plant, kp, ki, kd, tau_d)
     characteristics = characteristics_from_denominator(closed_loop_den)
-    if characteristics.stability_margin >= -1e-6:
+    stable = characteristics.stability_margin < -1e-6
+    if not stable and not simulate_unstable:
         return SimulationResult(
             stable=False,
             stability_margin=characteristics.stability_margin,
@@ -172,8 +176,6 @@ def simulate_closed_loop(
 
     try:
         trajectory = _step_response(closed_loop_num, closed_loop_den, time_grid)
-        control_num = np.convolve(controller_num, plant.denominator)
-        control_effort = _step_response(control_num, closed_loop_den, time_grid)
     except Exception as error:  # pragma: no cover - defensive boundary
         return SimulationResult(
             stable=False,
@@ -183,29 +185,75 @@ def simulate_closed_loop(
             peak_control_effort=None,
             dominant_oscillation_hz=characteristics.dominant_oscillation_hz,
             min_damping_ratio=characteristics.min_damping_ratio,
+            trajectory_clipped=False,
             reason=f"simulation_error:{type(error).__name__}",
         )
 
-    if not np.all(np.isfinite(trajectory)) or not np.all(np.isfinite(control_effort)):
-        return SimulationResult(
-            stable=False,
-            stability_margin=characteristics.stability_margin,
-            trajectory=None,
-            control_effort=None,
-            peak_control_effort=None,
-            dominant_oscillation_hz=characteristics.dominant_oscillation_hz,
-            min_damping_ratio=characteristics.min_damping_ratio,
-            reason="non_finite_response",
-        )
+    control_effort: np.ndarray | None = None
+    try:
+        control_num = np.convolve(controller_num, plant.denominator)
+        control_effort = _step_response(control_num, closed_loop_den, time_grid)
+    except Exception:  # pragma: no cover - defensive boundary
+        control_effort = None
 
-    peak_control_effort = float(np.max(np.abs(control_effort)))
+    clipped = False
+    if not np.all(np.isfinite(trajectory)) or (
+        control_effort is not None and not np.all(np.isfinite(control_effort))
+    ):
+        if trajectory_clip_abs is None:
+            return SimulationResult(
+                stable=False,
+                stability_margin=characteristics.stability_margin,
+                trajectory=None,
+                control_effort=None,
+                peak_control_effort=None,
+                dominant_oscillation_hz=characteristics.dominant_oscillation_hz,
+                min_damping_ratio=characteristics.min_damping_ratio,
+                trajectory_clipped=False,
+                reason="non_finite_response",
+            )
+        trajectory = np.nan_to_num(
+            trajectory,
+            nan=0.0,
+            posinf=trajectory_clip_abs,
+            neginf=-trajectory_clip_abs,
+        )
+        if control_effort is not None:
+            control_effort = np.nan_to_num(
+                control_effort,
+                nan=0.0,
+                posinf=trajectory_clip_abs,
+                neginf=-trajectory_clip_abs,
+            )
+        clipped = True
+
+    if trajectory_clip_abs is not None and (
+        np.max(np.abs(trajectory)) > trajectory_clip_abs
+        or (
+            control_effort is not None
+            and np.max(np.abs(control_effort)) > trajectory_clip_abs
+        )
+    ):
+        trajectory = np.clip(trajectory, -trajectory_clip_abs, trajectory_clip_abs)
+        if control_effort is not None:
+            control_effort = np.clip(control_effort, -trajectory_clip_abs, trajectory_clip_abs)
+        clipped = True
+
+    peak_control_effort = (
+        float(np.max(np.abs(control_effort))) if control_effort is not None else None
+    )
     return SimulationResult(
-        stable=True,
+        stable=stable,
         stability_margin=characteristics.stability_margin,
         trajectory=trajectory.astype(np.float32),
-        control_effort=control_effort.astype(np.float32),
+        control_effort=control_effort.astype(np.float32) if control_effort is not None else None,
         peak_control_effort=peak_control_effort,
         dominant_oscillation_hz=characteristics.dominant_oscillation_hz,
         min_damping_ratio=characteristics.min_damping_ratio,
-        reason=None,
+        trajectory_clipped=clipped,
+        reason=(
+            "unstable_closed_loop"
+            if not stable
+            else ("trajectory_clipped" if clipped else None)
+        ),
     )

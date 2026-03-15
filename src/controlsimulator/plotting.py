@@ -29,6 +29,32 @@ def plot_training_history(
     plt.close(figure)
 
 
+def plot_training_curves(
+    classifier_history: pd.DataFrame,
+    regressor_history: pd.DataFrame,
+    output_path: str | Path,
+) -> None:
+    figure, axes = plt.subplots(1, 2, figsize=(12, 4.2))
+    axes[0].plot(classifier_history["epoch"], classifier_history["train_loss"], label="train_loss")
+    axes[0].plot(classifier_history["epoch"], classifier_history["val_loss"], label="val_loss")
+    axes[0].set_title("Classifier")
+    axes[0].set_xlabel("Epoch")
+    axes[0].grid(alpha=0.3)
+    axes[0].legend()
+
+    axes[1].plot(regressor_history["epoch"], regressor_history["train_loss"], label="train_loss")
+    axes[1].plot(regressor_history["epoch"], regressor_history["val_loss"], label="val_loss")
+    axes[1].set_title("Regressor")
+    axes[1].set_xlabel("Epoch")
+    axes[1].grid(alpha=0.3)
+    axes[1].legend()
+
+    figure.suptitle("Training Curves")
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=180)
+    plt.close(figure)
+
+
 def plot_response_overlays(
     time_grid: np.ndarray,
     cases: list[dict[str, np.ndarray | str]],
@@ -155,6 +181,51 @@ def plot_gain_distributions(
     axes[0].set_ylabel("Count")
     axes[0].legend()
     figure.suptitle(title)
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=180)
+    plt.close(figure)
+
+
+def plot_class_balance(
+    stable_count: int,
+    unstable_count: int,
+    output_path: str | Path,
+    title: str,
+) -> None:
+    figure, axis = plt.subplots(figsize=(5.5, 4.2))
+    axis.bar(["stable", "unstable"], [stable_count, unstable_count], color=["#55A868", "#C44E52"])
+    axis.set_title(title)
+    axis.set_ylabel("Count")
+    axis.grid(axis="y", alpha=0.3)
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=180)
+    plt.close(figure)
+
+
+def plot_pole_distribution(
+    plants: pd.DataFrame,
+    output_path: str | Path,
+    title: str,
+) -> None:
+    figure, axis = plt.subplots(figsize=(7.0, 5.0))
+    for pole_index in range(3):
+        real_column = f"pole_{pole_index}_real"
+        imag_column = f"pole_{pole_index}_imag"
+        if real_column not in plants.columns or imag_column not in plants.columns:
+            continue
+        axis.scatter(
+            plants[real_column],
+            plants[imag_column],
+            s=10,
+            alpha=0.25,
+            label=f"pole {pole_index}",
+        )
+    axis.axvline(0.0, color="#444444", linestyle="--", linewidth=1.0)
+    axis.set_title(title)
+    axis.set_xlabel("Real part")
+    axis.set_ylabel("Imaginary part")
+    axis.grid(alpha=0.25)
+    axis.legend()
     figure.tight_layout()
     figure.savefig(output_path, dpi=180)
     plt.close(figure)

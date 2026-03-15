@@ -1,0 +1,4 @@
+method,method_label,plants,mean_cost,median_cost,stability_rate,mean_runtime,mean_simulations
+bayesian_optimization,Bayesian Optimization,100,14.748304254621432,11.905178945508112,0.82,0.298378889109008,24.0
+surrogate_gradient,Surrogate Gradient,100,20.103122168689456,18.79573318129999,0.72,0.09744891453097808,1.0
+surrogate_bo,Surrogate + BO,100,15.831682052419392,18.167760170113397,0.82,0.2408300487921224,10.0

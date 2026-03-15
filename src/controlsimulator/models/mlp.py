@@ -4,8 +4,22 @@ import torch
 from torch import nn
 
 
+def build_activation(name: str) -> nn.Module:
+    if name == "relu":
+        return nn.ReLU()
+    if name == "gelu":
+        return nn.GELU()
+    raise ValueError(f"Unsupported activation: {name}")
+
+
 class FeedForwardBackbone(nn.Module):
-    def __init__(self, input_dim: int, hidden_sizes: list[int], dropout: float) -> None:
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_sizes: list[int],
+        dropout: float,
+        activation: str = "gelu",
+    ) -> None:
         super().__init__()
         layers: list[nn.Module] = []
         previous = input_dim
@@ -13,7 +27,7 @@ class FeedForwardBackbone(nn.Module):
             layers.extend(
                 [
                     nn.Linear(previous, hidden_dim),
-                    nn.GELU(),
+                    build_activation(activation),
                     nn.Dropout(dropout),
                 ]
             )
@@ -32,9 +46,10 @@ class TrajectoryRegressor(nn.Module):
         output_dim: int,
         hidden_sizes: list[int],
         dropout: float,
+        activation: str = "gelu",
     ) -> None:
         super().__init__()
-        self.backbone = FeedForwardBackbone(input_dim, hidden_sizes, dropout)
+        self.backbone = FeedForwardBackbone(input_dim, hidden_sizes, dropout, activation=activation)
         self.head = nn.Linear(self.backbone.output_dim, output_dim)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:

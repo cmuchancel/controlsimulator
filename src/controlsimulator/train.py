@@ -14,24 +14,22 @@ from torch import nn
 from controlsimulator.config import TrainingConfig, save_config_snapshot
 from controlsimulator.dataset import dataset_metadata, dataset_time_grid, iter_dataset_chunks
 from controlsimulator.features import (
-    FEATURE_COLUMNS,
     GAIN_FEATURE_COLUMNS,
     PLANT_FEATURE_COLUMNS,
     RunningStatistics,
     Standardizer,
     feature_matrix,
+    resolve_feature_columns,
 )
 from controlsimulator.metrics import trajectory_mae, trajectory_rmse
 from controlsimulator.models import StabilityClassifier, TrajectoryRegressor
-from controlsimulator.plotting import plot_training_history
+from controlsimulator.plotting import plot_training_curves, plot_training_history
 from controlsimulator.utils import dump_json, ensure_dir, pick_device, resolve_path, set_global_seed
 
 RAW_FEATURE_COLUMNS = [
     *PLANT_FEATURE_COLUMNS,
     *[column for column in GAIN_FEATURE_COLUMNS if not column.startswith("log10_")],
 ]
-CLASSIFIER_COLUMNS = [*RAW_FEATURE_COLUMNS, "stable", "split"]
-REGRESSOR_COLUMNS = [*RAW_FEATURE_COLUMNS, "stable", "split"]
 
 
 @dataclass(slots=True)
@@ -62,6 +60,18 @@ class TrainingStatistics:
     mean_trajectory: np.ndarray
 
 
+def _raw_feature_columns_for(feature_columns: list[str]) -> list[str]:
+    return [column for column in feature_columns if not column.startswith("log10_")]
+
+
+def _dataset_columns_for(feature_columns: list[str]) -> list[str]:
+    return [*_raw_feature_columns_for(feature_columns), "stable", "split"]
+
+
+def _log_train_stage(message: str) -> None:
+    print(message, flush=True)
+
+
 def train_models(config: TrainingConfig) -> Path:
     set_global_seed(config.seed)
     dataset_dir = resolve_path(config.dataset_dir)
@@ -72,15 +82,21 @@ def train_models(config: TrainingConfig) -> Path:
     device = pick_device(config.device)
     time_grid = dataset_time_grid(dataset_dir)
     data_summary = dataset_metadata(dataset_dir)
-    stats = _fit_training_statistics(dataset_dir)
+    feature_columns = resolve_feature_columns(config.feature_set)
+    classifier_activation = config.classifier_activation or config.activation
+    _log_train_stage(f"[train] stats {run_dir.name}")
+    stats = _fit_training_statistics(dataset_dir, feature_columns)
 
+    _log_train_stage(f"[train] classifier {run_dir.name}")
     classifier_path, classifier_history, classifier_summary = _train_classifier(
         config=config,
         dataset_dir=dataset_dir,
         run_dir=run_dir,
         device=device,
         feature_scaler=stats.feature_scaler,
+        feature_columns=feature_columns,
         positive_fraction=stats.positive_fraction,
+        activation=classifier_activation,
     )
     plot_training_history(
         classifier_history,
@@ -89,6 +105,7 @@ def train_models(config: TrainingConfig) -> Path:
         value_columns=("train_loss", "val_loss"),
     )
 
+    _log_train_stage(f"[train] regressor {run_dir.name}")
     regressor_path, regressor_history, regressor_summary = _train_regressor(
         config=config,
         dataset_dir=dataset_dir,
@@ -97,6 +114,8 @@ def train_models(config: TrainingConfig) -> Path:
         feature_scaler=stats.feature_scaler,
         trajectory_scaler=stats.trajectory_scaler,
         time_grid=time_grid,
+        feature_columns=feature_columns,
+        activation=config.activation,
     )
     plot_training_history(
         regressor_history,
@@ -104,13 +123,20 @@ def train_models(config: TrainingConfig) -> Path:
         output_path=plots_dir / "regressor_training.png",
         value_columns=("train_loss", "val_loss"),
     )
+    plot_training_curves(
+        classifier_history,
+        regressor_history,
+        output_path=run_dir / "training_curves.png",
+    )
 
     summary = {
         "device": device,
         "dataset_name": data_summary["name"],
-        "feature_columns": FEATURE_COLUMNS,
+        "feature_columns": feature_columns,
+        "feature_set": config.feature_set,
         "classifier_checkpoint": str(classifier_path.relative_to(run_dir)),
         "regressor_checkpoint": str(regressor_path.relative_to(run_dir)),
+        "training_curves_path": "training_curves.png",
         "train_samples": stats.train_samples,
         "val_samples": stats.val_samples,
         "stable_train_samples": stats.stable_train_samples,
@@ -121,6 +147,7 @@ def train_models(config: TrainingConfig) -> Path:
     }
     np.save(run_dir / "mean_trajectory.npy", stats.mean_trajectory.astype(np.float32))
     dump_json(summary, run_dir / "train_summary.json")
+    _log_train_stage(f"[train] complete {run_dir.name}")
     return run_dir
 
 
@@ -132,7 +159,7 @@ def load_regressor_checkpoint(path: str | Path) -> dict[str, Any]:
     return torch.load(resolve_path(path), map_location="cpu", weights_only=False)
 
 
-def _fit_training_statistics(dataset_dir: Path) -> TrainingStatistics:
+def _fit_training_statistics(dataset_dir: Path, feature_columns: list[str]) -> TrainingStatistics:
     feature_stats = RunningStatistics()
     trajectory_stats = RunningStatistics()
     stable_label_sum = 0
@@ -145,7 +172,8 @@ def _fit_training_statistics(dataset_dir: Path) -> TrainingStatistics:
     for frame, trajectories in iter_dataset_chunks(
         dataset_dir,
         include_trajectories=True,
-        columns=REGRESSOR_COLUMNS,
+        columns=_dataset_columns_for(feature_columns),
+        progress_desc=f"train-stats:{dataset_dir.name}",
     ):
         if trajectories is None:
             raise RuntimeError("Expected chunk trajectories when fitting training statistics.")
@@ -158,7 +186,9 @@ def _fit_training_statistics(dataset_dir: Path) -> TrainingStatistics:
         stable_val_mask = val_mask & stable_mask
 
         if np.any(train_mask):
-            feature_stats.update(feature_matrix(frame.loc[train_mask, RAW_FEATURE_COLUMNS]))
+            feature_stats.update(
+                feature_matrix(frame.loc[train_mask], feature_columns=feature_columns)
+            )
         train_samples += int(train_mask.sum())
         val_samples += int(val_mask.sum())
         stable_train_samples += int(stable_train_mask.sum())
@@ -194,12 +224,15 @@ def _train_classifier(
     run_dir: Path,
     device: str,
     feature_scaler: Standardizer,
+    feature_columns: list[str],
     positive_fraction: float,
+    activation: str,
 ) -> tuple[Path, pd.DataFrame, dict[str, float]]:
     model = StabilityClassifier(
-        input_dim=len(FEATURE_COLUMNS),
+        input_dim=len(feature_columns),
         hidden_sizes=config.classifier_hidden_sizes,
         dropout=config.classifier_dropout,
+        activation=activation,
     ).to(device)
     criterion = nn.BCEWithLogitsLoss(
         pos_weight=torch.tensor(
@@ -225,20 +258,24 @@ def _train_classifier(
             dataset_dir=dataset_dir,
             split="train",
             feature_scaler=feature_scaler,
+            feature_columns=feature_columns,
             batch_size=config.batch_size,
             device=device,
             criterion=criterion,
             optimizer=optimizer,
             seed=config.seed + epoch,
+            progress_desc=f"classifier-train:{run_dir.name}:e{epoch:02d}",
         )
         val_metrics = _evaluate_classifier(
             model=model,
             dataset_dir=dataset_dir,
             split="val",
             feature_scaler=feature_scaler,
+            feature_columns=feature_columns,
             batch_size=config.batch_size,
             device=device,
             criterion=criterion,
+            progress_desc=f"classifier-val:{run_dir.name}:e{epoch:02d}",
         )
         history_rows.append(
             {
@@ -255,14 +292,21 @@ def _train_classifier(
             best_state = {
                 "model_state": model.state_dict(),
                 "feature_scaler": feature_scaler.to_dict(),
-                "input_dim": len(FEATURE_COLUMNS),
+                "feature_columns": feature_columns,
+                "input_dim": len(feature_columns),
                 "hidden_sizes": config.classifier_hidden_sizes,
                 "dropout": config.classifier_dropout,
+                "activation": activation,
             }
         else:
             patience += 1
             if patience >= config.patience:
                 break
+        _log_train_stage(
+            "[train] classifier "
+            f"{run_dir.name} epoch {epoch}/{config.epochs} "
+            f"train_loss={train_loss:.4f} val_f1={val_metrics.f1:.4f}"
+        )
 
     if best_state is None:
         raise RuntimeError("Classifier training did not produce a checkpoint.")
@@ -284,12 +328,15 @@ def _train_regressor(
     feature_scaler: Standardizer,
     trajectory_scaler: Standardizer,
     time_grid: np.ndarray,
+    feature_columns: list[str],
+    activation: str,
 ) -> tuple[Path, pd.DataFrame, dict[str, float]]:
     model = TrajectoryRegressor(
-        input_dim=len(FEATURE_COLUMNS),
+        input_dim=len(feature_columns),
         output_dim=time_grid.shape[0],
         hidden_sizes=config.hidden_sizes,
         dropout=config.dropout,
+        activation=activation,
     ).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -311,11 +358,13 @@ def _train_regressor(
             split="train",
             feature_scaler=feature_scaler,
             trajectory_scaler=trajectory_scaler,
+            feature_columns=feature_columns,
             batch_size=config.batch_size,
             device=device,
             criterion=criterion,
             optimizer=optimizer,
             seed=config.seed + 10_000 + epoch,
+            progress_desc=f"regressor-train:{run_dir.name}:e{epoch:02d}",
         )
         val_metrics = _evaluate_regressor(
             model=model,
@@ -323,9 +372,11 @@ def _train_regressor(
             split="val",
             feature_scaler=feature_scaler,
             trajectory_scaler=trajectory_scaler,
+            feature_columns=feature_columns,
             batch_size=config.batch_size,
             device=device,
             criterion=criterion,
+            progress_desc=f"regressor-val:{run_dir.name}:e{epoch:02d}",
         )
         history_rows.append(
             {
@@ -343,16 +394,23 @@ def _train_regressor(
                 "model_state": model.state_dict(),
                 "feature_scaler": feature_scaler.to_dict(),
                 "trajectory_scaler": trajectory_scaler.to_dict(),
-                "input_dim": len(FEATURE_COLUMNS),
+                "feature_columns": feature_columns,
+                "input_dim": len(feature_columns),
                 "output_dim": int(time_grid.shape[0]),
                 "hidden_sizes": config.hidden_sizes,
                 "dropout": config.dropout,
+                "activation": activation,
                 "time_grid": time_grid.tolist(),
             }
         else:
             patience += 1
             if patience >= config.patience:
                 break
+        _log_train_stage(
+            "[train] regressor "
+            f"{run_dir.name} epoch {epoch}/{config.epochs} "
+            f"train_loss={train_loss:.4f} val_rmse={val_metrics.rmse:.4f}"
+        )
 
     if best_state is None:
         raise RuntimeError("Regressor training did not produce a checkpoint.")
@@ -371,11 +429,13 @@ def _run_classifier_epoch(
     dataset_dir: Path,
     split: str,
     feature_scaler: Standardizer,
+    feature_columns: list[str],
     batch_size: int,
     device: str,
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
     seed: int,
+    progress_desc: str | None = None,
 ) -> float:
     model.train()
     rng = np.random.default_rng(seed)
@@ -384,11 +444,12 @@ def _run_classifier_epoch(
         dataset_dir,
         include_trajectories=False,
         splits={split},
-        columns=CLASSIFIER_COLUMNS,
+        columns=_dataset_columns_for(feature_columns),
+        progress_desc=progress_desc,
     ):
-        features = feature_scaler.transform(feature_matrix(frame[RAW_FEATURE_COLUMNS])).astype(
-            np.float32
-        )
+        features = feature_scaler.transform(
+            feature_matrix(frame, feature_columns=feature_columns)
+        ).astype(np.float32)
         targets = frame["stable"].to_numpy(dtype=np.float32)
         indices = rng.permutation(features.shape[0])
         features = features[indices]
@@ -418,9 +479,11 @@ def _evaluate_classifier(
     dataset_dir: Path,
     split: str,
     feature_scaler: Standardizer,
+    feature_columns: list[str],
     batch_size: int,
     device: str,
     criterion: nn.Module,
+    progress_desc: str | None = None,
 ) -> ClassifierMetrics:
     model.eval()
     losses: list[float] = []
@@ -431,11 +494,12 @@ def _evaluate_classifier(
             dataset_dir,
             include_trajectories=False,
             splits={split},
-            columns=CLASSIFIER_COLUMNS,
+            columns=_dataset_columns_for(feature_columns),
+            progress_desc=progress_desc,
         ):
-            features = feature_scaler.transform(feature_matrix(frame[RAW_FEATURE_COLUMNS])).astype(
-                np.float32
-            )
+            features = feature_scaler.transform(
+                feature_matrix(frame, feature_columns=feature_columns)
+            ).astype(np.float32)
             targets = frame["stable"].to_numpy(dtype=np.float32)
             for start in range(0, features.shape[0], batch_size):
                 batch_inputs = torch.tensor(
@@ -473,11 +537,13 @@ def _run_regressor_epoch(
     split: str,
     feature_scaler: Standardizer,
     trajectory_scaler: Standardizer,
+    feature_columns: list[str],
     batch_size: int,
     device: str,
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
     seed: int,
+    progress_desc: str | None = None,
 ) -> float:
     model.train()
     rng = np.random.default_rng(seed)
@@ -487,13 +553,14 @@ def _run_regressor_epoch(
         include_trajectories=True,
         splits={split},
         stable_only=True,
-        columns=REGRESSOR_COLUMNS,
+        columns=_dataset_columns_for(feature_columns),
+        progress_desc=progress_desc,
     ):
         if trajectories is None:
             raise RuntimeError("Expected trajectories for regressor training.")
-        features = feature_scaler.transform(feature_matrix(frame[RAW_FEATURE_COLUMNS])).astype(
-            np.float32
-        )
+        features = feature_scaler.transform(
+            feature_matrix(frame, feature_columns=feature_columns)
+        ).astype(np.float32)
         scaled_targets = trajectory_scaler.transform(trajectories).astype(np.float32)
         indices = rng.permutation(features.shape[0])
         features = features[indices]
@@ -524,9 +591,11 @@ def _evaluate_regressor(
     split: str,
     feature_scaler: Standardizer,
     trajectory_scaler: Standardizer,
+    feature_columns: list[str],
     batch_size: int,
     device: str,
     criterion: nn.Module,
+    progress_desc: str | None = None,
 ) -> RegressorMetrics:
     model.eval()
     losses: list[float] = []
@@ -538,13 +607,14 @@ def _evaluate_regressor(
             include_trajectories=True,
             splits={split},
             stable_only=True,
-            columns=REGRESSOR_COLUMNS,
+            columns=_dataset_columns_for(feature_columns),
+            progress_desc=progress_desc,
         ):
             if trajectories is None:
                 raise RuntimeError("Expected trajectories for regressor evaluation.")
-            features = feature_scaler.transform(feature_matrix(frame[RAW_FEATURE_COLUMNS])).astype(
-                np.float32
-            )
+            features = feature_scaler.transform(
+                feature_matrix(frame, feature_columns=feature_columns)
+            ).astype(np.float32)
             scaled_targets = trajectory_scaler.transform(trajectories).astype(np.float32)
             for start in range(0, features.shape[0], batch_size):
                 batch_inputs = torch.tensor(

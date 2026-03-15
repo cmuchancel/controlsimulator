@@ -1,0 +1,48 @@
+{
+  "cost_plot_path": "/Users/chancelavoie/Desktop/nn_pid_simulator/artifacts/eval_plots/pid_surrogate_bo_cost_boxplot.png",
+  "excluded_families": [
+    "campaign_third_order_unstable"
+  ],
+  "n_plants": 100,
+  "name": "third_order_pid_surrogate_bo",
+  "objective": "J = settling_time + overshoot_pct/100 + steady_state_error",
+  "results_path": "/Users/chancelavoie/Desktop/nn_pid_simulator/artifacts/eval_tables/pid_surrogate_bo_results.csv",
+  "simulation_plot_path": "/Users/chancelavoie/Desktop/nn_pid_simulator/artifacts/eval_plots/pid_surrogate_bo_simulation_counts.png",
+  "source_splits": [
+    "test",
+    "ood_test"
+  ],
+  "summary_path": "/Users/chancelavoie/Desktop/nn_pid_simulator/artifacts/eval_tables/pid_surrogate_bo_summary.csv",
+  "summary_rows": [
+    {
+      "mean_cost": 14.748304254621432,
+      "mean_runtime": 0.298378889109008,
+      "mean_simulations": 24.0,
+      "median_cost": 11.905178945508112,
+      "method": "bayesian_optimization",
+      "method_label": "Bayesian Optimization",
+      "plants": 100,
+      "stability_rate": 0.82
+    },
+    {
+      "mean_cost": 20.103122168689456,
+      "mean_runtime": 0.09744891453097808,
+      "mean_simulations": 1.0,
+      "median_cost": 18.79573318129999,
+      "method": "surrogate_gradient",
+      "method_label": "Surrogate Gradient",
+      "plants": 100,
+      "stability_rate": 0.72
+    },
+    {
+      "mean_cost": 15.831682052419392,
+      "mean_runtime": 0.2408300487921224,
+      "mean_simulations": 10.0,
+      "median_cost": 18.167760170113397,
+      "method": "surrogate_bo",
+      "method_label": "Surrogate + BO",
+      "plants": 100,
+      "stability_rate": 0.82
+    }
+  ]
+}
