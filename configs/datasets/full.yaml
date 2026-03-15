@@ -1,8 +1,8 @@
 name: full_v2
 seed: 42
 output_dir: artifacts/datasets
-n_plants: 1200
-controllers_per_plant: 20
+n_plants: 1800
+controllers_per_plant: 24
 families:
   - first_order
   - second_order
@@ -13,7 +13,7 @@ ood_families:
 t_final: 8.0
 n_time_steps: 200
 derivative_filter_tau: 0.05
-chunk_size_plants: 60
+chunk_size_plants: 75
 val_fraction: 0.15
 test_fraction: 0.15
 kp_multiplier_range: [0.02, 50.0]

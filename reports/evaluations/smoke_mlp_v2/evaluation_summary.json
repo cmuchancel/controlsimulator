@@ -1,0 +1,78 @@
+{
+  "classifier": {
+    "ood_test": {
+      "accuracy": 0.9113475177304965,
+      "f1": 0.9479166666666666,
+      "majority_accuracy": 0.8776595744680851,
+      "majority_f1": 0.9348441926345609,
+      "precision": 0.978494623655914,
+      "recall": 0.9191919191919192
+    },
+    "test": {
+      "accuracy": 0.9416666666666667,
+      "f1": 0.9642857142857143,
+      "majority_accuracy": 0.8458333333333333,
+      "majority_f1": 0.9164785553047404,
+      "precision": 1.0,
+      "recall": 0.9310344827586207
+    }
+  },
+  "feature_columns": [
+    "num_0",
+    "num_1",
+    "den_0",
+    "den_1",
+    "den_2",
+    "den_3",
+    "dc_gain",
+    "dominant_pole_mag",
+    "mean_pole_mag",
+    "plant_order",
+    "kp",
+    "ki",
+    "kd",
+    "log10_kp",
+    "log10_ki",
+    "log10_kd"
+  ],
+  "regressor": {
+    "ood_test": {
+      "baseline_overshoot_pct_mae": 21.55780117921155,
+      "baseline_rise_time_mae": NaN,
+      "baseline_settling_time_mae": NaN,
+      "baseline_steady_state_error_mae": 0.2044367734831993,
+      "baseline_trajectory_mae": 0.25717800855636597,
+      "baseline_trajectory_rmse": 0.3320833146572113,
+      "n_stable_samples": 495,
+      "overshoot_pct_defined_fraction": 1.0,
+      "overshoot_pct_mae": 20.60538573698564,
+      "rise_time_defined_fraction": 0.5313131313131313,
+      "rise_time_mae": 0.6172678904229654,
+      "settling_time_defined_fraction": 0.23232323232323232,
+      "settling_time_mae": 2.873260957047795,
+      "steady_state_error_defined_fraction": 1.0,
+      "steady_state_error_mae": 0.059956002626756225,
+      "trajectory_mae": 0.10961171984672546,
+      "trajectory_rmse": 0.17021271586418152
+    },
+    "test": {
+      "baseline_overshoot_pct_mae": 16.004727450497633,
+      "baseline_rise_time_mae": NaN,
+      "baseline_settling_time_mae": NaN,
+      "baseline_steady_state_error_mae": 0.148560627120469,
+      "baseline_trajectory_mae": 0.2182181477546692,
+      "baseline_trajectory_rmse": 0.2802829146385193,
+      "n_stable_samples": 203,
+      "overshoot_pct_defined_fraction": 1.0,
+      "overshoot_pct_mae": 13.743878702812006,
+      "rise_time_defined_fraction": 0.6699507389162561,
+      "rise_time_mae": 0.4748911576775404,
+      "settling_time_defined_fraction": 0.3497536945812808,
+      "settling_time_mae": 3.797874657758351,
+      "steady_state_error_defined_fraction": 1.0,
+      "steady_state_error_mae": 0.040264406594736825,
+      "trajectory_mae": 0.07587846368551254,
+      "trajectory_rmse": 0.1274632066488266
+    }
+  }
+}
