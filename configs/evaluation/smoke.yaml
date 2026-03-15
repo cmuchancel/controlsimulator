@@ -1,6 +1,6 @@
-name: smoke_mlp_v2
-dataset_dir: artifacts/datasets/smoke_v2
-run_dir: artifacts/runs/smoke_mlp_v2
+name: smoke_mlp_v3
+dataset_dir: artifacts/datasets/smoke_v3
+run_dir: artifacts/runs/smoke_mlp_v3
 output_dir: reports/evaluations
 benchmark_batch_size: 64
 benchmark_single_repeats: 120

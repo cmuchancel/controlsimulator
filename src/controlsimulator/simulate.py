@@ -64,6 +64,28 @@ def is_stable(denominator: np.ndarray, tolerance: float = -1e-6) -> bool:
     return stability_margin(denominator) < tolerance
 
 
+def closed_loop_stability_margin(
+    plant: Plant,
+    kp: float,
+    ki: float,
+    kd: float,
+    tau_d: float,
+) -> float:
+    *_, closed_loop_den = closed_loop_transfer_function(plant, kp, ki, kd, tau_d)
+    return stability_margin(closed_loop_den)
+
+
+def closed_loop_is_stable(
+    plant: Plant,
+    kp: float,
+    ki: float,
+    kd: float,
+    tau_d: float,
+    tolerance: float = -1e-6,
+) -> bool:
+    return closed_loop_stability_margin(plant, kp, ki, kd, tau_d) < tolerance
+
+
 def _step_response(
     numerator: np.ndarray,
     denominator: np.ndarray,

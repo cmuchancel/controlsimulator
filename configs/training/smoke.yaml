@@ -1,14 +1,14 @@
-name: smoke_mlp_v2
-dataset_dir: artifacts/datasets/smoke_v2
+name: smoke_mlp_v3
+dataset_dir: artifacts/datasets/smoke_v3
 output_dir: artifacts/runs
 seed: 42
 device: auto
-batch_size: 256
-epochs: 40
+batch_size: 512
+epochs: 35
 patience: 8
 learning_rate: 0.001
 weight_decay: 0.0001
-hidden_sizes: [128, 128, 128]
-classifier_hidden_sizes: [64, 64]
+hidden_sizes: [192, 192, 192]
+classifier_hidden_sizes: [96, 96]
 dropout: 0.1
 classifier_dropout: 0.1

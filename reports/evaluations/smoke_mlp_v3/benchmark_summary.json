@@ -1,0 +1,11 @@
+{
+  "batch_simulation_per_sample_ms": 1.079234703183829,
+  "batch_simulation_seconds": 0.06907102100376505,
+  "batch_size": 64,
+  "batch_speedup_x": 310.6640250488231,
+  "batch_surrogate_per_sample_ms": 0.003473960987321334,
+  "batch_surrogate_seconds": 0.00022233350318856537,
+  "single_simulation_seconds": 0.0008776040049269795,
+  "single_speedup_x": 9.547839341503952,
+  "single_surrogate_seconds": 9.191650315187871e-05
+}

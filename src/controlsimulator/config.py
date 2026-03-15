@@ -14,12 +14,18 @@ class DatasetConfig:
     output_dir: str = "artifacts/datasets"
     n_plants: int = 240
     controllers_per_plant: int = 12
+    num_workers: int = 1
     families: list[str] = field(
         default_factory=lambda: [
             "first_order",
             "second_order",
+            "underdamped_second_order",
+            "overdamped_second_order",
             "third_order",
+            "third_order_real_poles",
+            "third_order_mixed_real_complex",
             "lightly_damped_second_order",
+            "weakly_resonant_third_order",
         ]
     )
     ood_families: list[str] = field(default_factory=lambda: ["lightly_damped_second_order"])
@@ -32,6 +38,13 @@ class DatasetConfig:
     kp_multiplier_range: list[float] = field(default_factory=lambda: [0.02, 50.0])
     ki_multiplier_range: list[float] = field(default_factory=lambda: [0.01, 80.0])
     kd_multiplier_range: list[float] = field(default_factory=lambda: [0.001, 25.0])
+    wide_sampling_fraction: float = 0.5
+    boundary_search_steps: int = 6
+    boundary_mix_std: float = 0.12
+    boundary_jitter_std: float = 0.08
+    max_abs_trajectory: float = 12.0
+    max_peak_control_effort: float = 250.0
+    max_unstable_fraction_abort: float = 0.5
 
     def dataset_dir(self) -> Path:
         return Path(self.output_dir) / self.name

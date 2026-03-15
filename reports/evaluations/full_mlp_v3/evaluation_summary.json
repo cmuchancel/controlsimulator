@@ -1,0 +1,80 @@
+{
+  "artifacts_plot_dir": "/Users/chancelavoie/Desktop/nn_pid_simulator/artifacts/plots/full_mlp_v3",
+  "classifier": {
+    "ood_test": {
+      "accuracy": 0.8745293674698795,
+      "f1": 0.9027835176856691,
+      "majority_accuracy": 0.6754674949799196,
+      "majority_f1": 0.8063033117667437,
+      "precision": 0.947032871751715,
+      "recall": 0.8624846134194207
+    },
+    "test": {
+      "accuracy": 0.9126575880114177,
+      "f1": 0.9323943337821199,
+      "majority_accuracy": 0.6840360371075167,
+      "majority_f1": 0.8123769587287575,
+      "precision": 0.9907801418439717,
+      "recall": 0.8805068353219883
+    }
+  },
+  "family_metrics_path": "family_metrics.csv",
+  "feature_columns": [
+    "num_0",
+    "num_1",
+    "den_0",
+    "den_1",
+    "den_2",
+    "den_3",
+    "dc_gain",
+    "dominant_pole_mag",
+    "mean_pole_mag",
+    "plant_order",
+    "kp",
+    "ki",
+    "kd",
+    "log10_kp",
+    "log10_ki",
+    "log10_kd"
+  ],
+  "regressor": {
+    "ood_test": {
+      "baseline_overshoot_pct_mae": 26.80769466857127,
+      "baseline_rise_time_mae": NaN,
+      "baseline_settling_time_mae": NaN,
+      "baseline_steady_state_error_mae": 0.19113766530894946,
+      "baseline_trajectory_mae": 0.26473134756088257,
+      "baseline_trajectory_rmse": 0.34480413794517517,
+      "n_stable_samples": 43057,
+      "overshoot_pct_defined_fraction": 1.0,
+      "overshoot_pct_mae": 6.214276324313641,
+      "rise_time_defined_fraction": 0.8123185544743015,
+      "rise_time_mae": 0.09916757865393659,
+      "settling_time_defined_fraction": 0.21357735095338737,
+      "settling_time_mae": 1.4251289011852872,
+      "steady_state_error_defined_fraction": 1.0,
+      "steady_state_error_mae": 0.0637957417548532,
+      "trajectory_mae": 0.06868837773799896,
+      "trajectory_rmse": 0.13437117636203766
+    },
+    "test": {
+      "baseline_overshoot_pct_mae": 30.22242263809615,
+      "baseline_rise_time_mae": NaN,
+      "baseline_settling_time_mae": NaN,
+      "baseline_steady_state_error_mae": 0.19138680371674838,
+      "baseline_trajectory_mae": 0.2785947620868683,
+      "baseline_trajectory_rmse": 0.3617759644985199,
+      "n_stable_samples": 46011,
+      "overshoot_pct_defined_fraction": 1.0,
+      "overshoot_pct_mae": 3.5949163185988176,
+      "rise_time_defined_fraction": 0.7935059007628611,
+      "rise_time_mae": 0.07300909294481389,
+      "settling_time_defined_fraction": 0.29912412249244746,
+      "settling_time_mae": 0.9757823164408471,
+      "steady_state_error_defined_fraction": 1.0,
+      "steady_state_error_mae": 0.045356492070262856,
+      "trajectory_mae": 0.039852943271398544,
+      "trajectory_rmse": 0.09015656262636185
+    }
+  }
+}

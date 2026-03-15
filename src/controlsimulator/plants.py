@@ -9,8 +9,13 @@ MAX_NUM_ORDER = 1
 FAMILY_CHOICES = [
     "first_order",
     "second_order",
+    "underdamped_second_order",
+    "overdamped_second_order",
     "third_order",
+    "third_order_real_poles",
+    "third_order_mixed_real_complex",
     "lightly_damped_second_order",
+    "weakly_resonant_third_order",
 ]
 
 
@@ -109,13 +114,66 @@ def _sample_second_order(
     return _make_transfer_function(plant_id, family, poles, zeros, dc_gain)
 
 
-def _sample_third_order(rng: np.random.Generator, plant_id: int) -> Plant:
+def _sample_overdamped_second_order(rng: np.random.Generator, plant_id: int) -> Plant:
+    slow_pole = -rng.uniform(0.35, 2.0)
+    fast_ratio = rng.uniform(1.6, 5.0)
+    poles = [slow_pole, slow_pole * fast_ratio]
+    zeros: list[complex] = []
+    if rng.random() < 0.2:
+        zeros = [-rng.uniform(0.25, 2.5)]
+    dc_gain = rng.uniform(0.5, 2.0)
+    return _make_transfer_function(plant_id, "overdamped_second_order", poles, zeros, dc_gain)
+
+
+def _sample_third_order_real_poles(rng: np.random.Generator, plant_id: int) -> Plant:
     poles = sorted((-rng.uniform(0.4, 4.5, size=3)).tolist())
     zeros: list[complex] = []
     if rng.random() < 0.35:
         zeros = [-rng.uniform(0.4, 3.5)]
     dc_gain = rng.uniform(0.4, 1.8)
-    return _make_transfer_function(plant_id, "third_order", poles, zeros, dc_gain)
+    return _make_transfer_function(plant_id, "third_order_real_poles", poles, zeros, dc_gain)
+
+
+def _sample_third_order_mixed_real_complex(rng: np.random.Generator, plant_id: int) -> Plant:
+    wn = rng.uniform(0.8, 4.2)
+    zeta = rng.uniform(0.25, 0.85)
+    complex_real = -zeta * wn
+    complex_imag = wn * np.sqrt(max(0.0, 1.0 - zeta**2))
+    real_pole = -rng.uniform(0.5, 4.5)
+    poles = [
+        complex_real + 1j * complex_imag,
+        complex_real - 1j * complex_imag,
+        real_pole,
+    ]
+    zeros: list[complex] = []
+    if rng.random() < 0.4:
+        zeros = [-rng.uniform(0.4, 3.5)]
+    dc_gain = rng.uniform(0.4, 1.8)
+    return _make_transfer_function(
+        plant_id,
+        "third_order_mixed_real_complex",
+        poles,
+        zeros,
+        dc_gain,
+    )
+
+
+def _sample_weakly_resonant_third_order(rng: np.random.Generator, plant_id: int) -> Plant:
+    wn = rng.uniform(0.8, 3.4)
+    zeta = rng.uniform(0.1, 0.22)
+    complex_real = -zeta * wn
+    complex_imag = wn * np.sqrt(max(0.0, 1.0 - zeta**2))
+    real_pole = -rng.uniform(2.0, 6.0)
+    poles = [
+        complex_real + 1j * complex_imag,
+        complex_real - 1j * complex_imag,
+        real_pole,
+    ]
+    zeros: list[complex] = []
+    if rng.random() < 0.45:
+        zeros = [-rng.uniform(0.3, 2.0)]
+    dc_gain = rng.uniform(0.4, 1.6)
+    return _make_transfer_function(plant_id, "weakly_resonant_third_order", poles, zeros, dc_gain)
 
 
 def sample_plant(
@@ -128,11 +186,23 @@ def sample_plant(
     if family == "first_order":
         return _sample_first_order(rng, plant_id)
     if family == "second_order":
-        return _sample_second_order(rng, plant_id, family, (0.35, 1.15))
+        return _sample_second_order(rng, plant_id, family, (0.55, 0.95))
+    if family == "underdamped_second_order":
+        return _sample_second_order(rng, plant_id, family, (0.22, 0.55))
+    if family == "overdamped_second_order":
+        return _sample_overdamped_second_order(rng, plant_id)
     if family == "lightly_damped_second_order":
-        return _sample_second_order(rng, plant_id, family, (0.08, 0.3))
+        return _sample_second_order(rng, plant_id, family, (0.08, 0.22))
     if family == "third_order":
-        return _sample_third_order(rng, plant_id)
+        if rng.random() < 0.5:
+            return _sample_third_order_real_poles(rng, plant_id)
+        return _sample_third_order_mixed_real_complex(rng, plant_id)
+    if family == "third_order_real_poles":
+        return _sample_third_order_real_poles(rng, plant_id)
+    if family == "third_order_mixed_real_complex":
+        return _sample_third_order_mixed_real_complex(rng, plant_id)
+    if family == "weakly_resonant_third_order":
+        return _sample_weakly_resonant_third_order(rng, plant_id)
     raise ValueError(f"Unknown plant family: {family}")
 
 

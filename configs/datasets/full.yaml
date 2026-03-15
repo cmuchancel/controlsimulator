@@ -1,21 +1,32 @@
-name: full_v2
+name: full_v3
 seed: 42
 output_dir: artifacts/datasets
-n_plants: 1800
-controllers_per_plant: 24
+n_plants: 16000
+controllers_per_plant: 32
+num_workers: 6
 families:
   - first_order
   - second_order
-  - third_order
+  - underdamped_second_order
+  - overdamped_second_order
+  - third_order_real_poles
+  - third_order_mixed_real_complex
   - lightly_damped_second_order
+  - weakly_resonant_third_order
 ood_families:
   - lightly_damped_second_order
 t_final: 8.0
 n_time_steps: 200
 derivative_filter_tau: 0.05
-chunk_size_plants: 75
+chunk_size_plants: 320
 val_fraction: 0.15
 test_fraction: 0.15
 kp_multiplier_range: [0.02, 50.0]
 ki_multiplier_range: [0.01, 80.0]
 kd_multiplier_range: [0.001, 25.0]
+wide_sampling_fraction: 0.5
+boundary_search_steps: 6
+boundary_mix_std: 0.12
+boundary_jitter_std: 0.08
+max_abs_trajectory: 12.0
+max_peak_control_effort: 250.0

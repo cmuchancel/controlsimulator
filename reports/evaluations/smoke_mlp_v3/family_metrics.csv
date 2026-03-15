@@ -1,0 +1,17 @@
+split,plant_family,task,n_samples,accuracy,f1,trajectory_rmse,trajectory_mae,baseline_trajectory_rmse
+test,first_order,classifier,112,1.0,1.0,,,
+test,overdamped_second_order,classifier,96,0.7395833333333334,0.7933884297520661,,,
+test,second_order,classifier,112,0.7857142857142857,0.8421052631578947,,,
+test,third_order_mixed_real_complex,classifier,112,0.6696428571428571,0.6021505376344086,,,
+test,third_order_real_poles,classifier,96,0.6458333333333334,0.5853658536585366,,,
+test,underdamped_second_order,classifier,112,0.8214285714285714,0.8507462686567164,,,
+test,weakly_resonant_third_order,classifier,96,0.71875,0.6746987951807228,,,
+test,first_order,regressor,112,,,0.06626476347446442,0.03563942387700081,0.252750426530838
+test,overdamped_second_order,regressor,72,,,0.2534848153591156,0.1465446949005127,0.3792380094528198
+test,second_order,regressor,87,,,0.23653525114059448,0.13479246199131012,0.3552935719490051
+test,third_order_mixed_real_complex,regressor,60,,,0.2972870171070099,0.20367629826068878,0.4279763102531433
+test,third_order_real_poles,regressor,58,,,0.3726498782634735,0.2673477828502655,0.48363497853279114
+test,underdamped_second_order,regressor,73,,,0.21510791778564453,0.13521933555603027,0.3576935827732086
+test,weakly_resonant_third_order,regressor,49,,,0.20331506431102753,0.13129247725009918,0.3793363571166992
+ood_test,lightly_damped_second_order,classifier,864,0.7951388888888888,0.843501326259947,,,
+ood_test,lightly_damped_second_order,regressor,582,,,0.19934074580669403,0.1244044229388237,0.33617380261421204
